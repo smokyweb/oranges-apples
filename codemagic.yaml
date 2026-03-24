@@ -7,7 +7,7 @@ workflows:
     name: Android Release APK
     max_build_duration: 60
     environment:
-      node: 18.18.0
+      node: 20.18.0
       java: 17
       vars:
         PACKAGE_NAME: "com.orangestoapples.app"
@@ -50,7 +50,7 @@ workflows:
     integrations:
       app_store_connect: Codemagic Orangestoapples
     environment:
-      node: 18.18.0
+      node: 20.18.0
       xcode: latest
       cocoapods: default
       groups:
