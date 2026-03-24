@@ -83,31 +83,49 @@ workflows:
         script: |
           sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = $APP_APPLE_TEAM_ID;/g" ios/*.xcodeproj/project.pbxproj || true
 
-      - name: Fetch signing certificate and provisioning profile
-        script: |
-          keychain initialize
-          # Revoke any existing distribution certs so --create generates a fresh one with a new private key
-          app-store-connect certificates revoke \
-            --type IOS_DISTRIBUTION \
-            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
-          # Create new cert + provisioning profile
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE \
-            --create \
-            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID"
-          keychain add-certificates
-
       - name: Build IPA for TestFlight
         script: |
-          xcode-project use-profiles
-          xcode-project build-ipa \
-            --workspace "$XCODE_WORKSPACE" \
-            --scheme "$XCODE_SCHEME" \
-            --config Release
+          # Write ASC private key to temp file for xcodebuild auth
+          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > /tmp/asc_key.p8
+
+          # Archive
+          xcodebuild archive \
+            -workspace "$XCODE_WORKSPACE" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath /tmp/OTA.xcarchive \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$APP_APPLE_TEAM_ID" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath /tmp/asc_key.p8 \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
+            | xcpretty
+
+          # Export IPA
+          cat > /tmp/export_options.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store</string>
+            <key>teamID</key><string>${APP_APPLE_TEAM_ID}</string>
+            <key>uploadBitcode</key><false/>
+            <key>uploadSymbols</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath /tmp/OTA.xcarchive \
+            -exportPath build/ios/ipa \
+            -exportOptionsPlist /tmp/export_options.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath /tmp/asc_key.p8 \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+
+          rm /tmp/asc_key.p8
 
     artifacts:
       - build/ios/ipa/*.ipa
