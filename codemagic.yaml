@@ -47,6 +47,8 @@ workflows:
   ios-testflight:
     name: iOS TestFlight
     max_build_duration: 90
+    integrations:
+      app_store_connect: Codemagic Orangestoapples
     environment:
       node: 18.18.0
       xcode: latest
@@ -54,15 +56,10 @@ workflows:
       groups:
         - app_store_cred
       vars:
-        APP_STORE_CONNECT_KEY_IDENTIFIER: 59WAASGLSX
-        APP_STORE_CONNECT_ISSUER_ID: 69a6de73-12f3-47e3-e053-5b8c7c11a4d1
         APP_APPLE_TEAM_ID: YQGQU3RV34
         BUNDLE_ID: com.orangestoapples.app
-        XCODE_PROJECT: "ios/Oranges_To_Apples.xcodeproj"
         XCODE_WORKSPACE: "ios/Oranges_To_Apples.xcworkspace"
         XCODE_SCHEME: "Oranges_To_Apples"
-        # APP_STORE_CONNECT_PRIVATE_KEY must be added in Codemagic dashboard
-        # Environment Variables → APP_STORE_CONNECT_PRIVATE_KEY → paste full .p8 contents
 
     scripts:
       - name: Install npm dependencies
@@ -91,15 +88,12 @@ workflows:
           keychain initialize
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
-            --create \
-            --certificate-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID"
+            --create
           keychain add-certificates
 
       - name: Build IPA for TestFlight
         script: |
-          xcode-project use-profiles --create
+          xcode-project use-profiles
           xcode-project build-ipa \
             --workspace "$XCODE_WORKSPACE" \
             --scheme "$XCODE_SCHEME" \
@@ -111,7 +105,7 @@ workflows:
 
     publishing:
       app_store_connect:
-        auth: environment_variables
+        auth: integration
         submit_to_testflight: true
         beta_groups:
           - "External Testers"
