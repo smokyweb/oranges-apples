@@ -88,31 +88,21 @@ workflows:
           set -e
           keychain initialize
 
-          # Delete any existing IOS_DISTRIBUTION certs that have no private key on this machine
-          CERT_IDS=$(app-store-connect certificates list \
-            --type IOS_DISTRIBUTION \
-            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
-            --json 2>/dev/null | python3 -c "import sys,json; [print(c['id']) for c in json.load(sys.stdin)]" 2>/dev/null || true)
+          # Generate a fresh RSA private key — this becomes the new cert's private key
+          openssl genrsa -out /tmp/cert_key.pem 2048
+          echo "Generated new RSA key"
 
-          for cert_id in $CERT_IDS; do
-            echo "Deleting cert $cert_id"
-            app-store-connect certificates delete "$cert_id" \
-              --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
-          done
-
-          # Now create fresh cert + provisioning profile
+          # Create new Distribution cert + provisioning profile using our fresh key
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
             --create \
+            --certificate-key @file:/tmp/cert_key.pem \
             --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID"
 
           keychain add-certificates
+          rm /tmp/cert_key.pem
 
       - name: Build IPA for TestFlight
         script: |
