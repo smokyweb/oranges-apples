@@ -108,18 +108,20 @@ workflows:
           echo "=== Archive done. Contents: ==="
           ls -la "$ARCHIVE_PATH" || echo "Archive missing!"
 
-          cat > /tmp/export_options.plist << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>method</key><string>app-store</string>
-  <key>teamID</key><string>$APP_APPLE_TEAM_ID</string>
-  <key>uploadBitcode</key><false/>
-  <key>uploadSymbols</key><true/>
-</dict>
-</plist>
-PLIST
+          python3 -c "
+import os
+team = os.environ['APP_APPLE_TEAM_ID']
+plist = '''<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\"><dict>
+<key>method</key><string>app-store</string>
+<key>teamID</key><string>''' + team + '''</string>
+<key>uploadBitcode</key><false/>
+<key>uploadSymbols</key><true/>
+</dict></plist>'''
+open('/tmp/export_options.plist','w').write(plist)
+print('Plist written')
+"
 
           echo "=== Exporting IPA ==="
           xcodebuild -exportArchive \
