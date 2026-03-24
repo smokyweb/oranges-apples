@@ -47,8 +47,6 @@ workflows:
   ios-testflight:
     name: iOS TestFlight
     max_build_duration: 90
-    integrations:
-      app_store_connect: Codemagic Orangestoapples
     environment:
       node: 18.18.0
       xcode: latest
@@ -113,7 +111,7 @@ workflows:
 
     publishing:
       app_store_connect:
-        auth: integration
+        auth: environment_variables
         submit_to_testflight: true
         beta_groups:
           - "External Testers"
