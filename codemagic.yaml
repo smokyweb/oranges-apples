@@ -83,46 +83,46 @@ workflows:
         script: |
           sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = $APP_APPLE_TEAM_ID;/g" ios/*.xcodeproj/project.pbxproj || true
 
+      - name: Set up code signing
+        script: |
+          set -e
+          keychain initialize
+
+          # Delete any existing IOS_DISTRIBUTION certs that have no private key on this machine
+          CERT_IDS=$(app-store-connect certificates list \
+            --type IOS_DISTRIBUTION \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+            --json 2>/dev/null | python3 -c "import sys,json; [print(c['id']) for c in json.load(sys.stdin)]" 2>/dev/null || true)
+
+          for cert_id in $CERT_IDS; do
+            echo "Deleting cert $cert_id"
+            app-store-connect certificates delete "$cert_id" \
+              --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
+          done
+
+          # Now create fresh cert + provisioning profile
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID"
+
+          keychain add-certificates
+
       - name: Build IPA for TestFlight
         script: |
           set -e
-          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > /tmp/asc_key.p8
-
-          ARCHIVE_PATH="$CM_BUILD_DIR/OTA.xcarchive"
-          EXPORT_PATH="$CM_BUILD_DIR/ipa"
-          mkdir -p "$EXPORT_PATH"
-
-          echo "=== Archiving ==="
-          xcodebuild archive \
-            -workspace "$XCODE_WORKSPACE" \
-            -scheme "$XCODE_SCHEME" \
-            -configuration Release \
-            -archivePath "$ARCHIVE_PATH" \
-            CODE_SIGN_STYLE=Automatic \
-            DEVELOPMENT_TEAM="$APP_APPLE_TEAM_ID" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath /tmp/asc_key.p8 \
-            -authenticationKeyID "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
-
-          echo "=== Archive done. Contents: ==="
-          ls -la "$ARCHIVE_PATH" || echo "Archive missing!"
-
-          cp ios/export_options.plist /tmp/export_options.plist
-
-          echo "=== Exporting IPA ==="
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE_PATH" \
-            -exportPath "$EXPORT_PATH" \
-            -exportOptionsPlist /tmp/export_options.plist \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath /tmp/asc_key.p8 \
-            -authenticationKeyID "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
-
-          echo "=== Export contents: ==="
-          ls -la "$EXPORT_PATH"
-          rm /tmp/asc_key.p8
+          xcode-project use-profiles
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME" \
+            --config Release \
+            --archive-xcargs "DEVELOPMENT_TEAM=$APP_APPLE_TEAM_ID"
 
       - name: Upload to TestFlight
         script: |
@@ -149,7 +149,7 @@ workflows:
             --verbose
 
     artifacts:
-      - $CM_BUILD_DIR/ipa/*.ipa
+      - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
 
     publishing:
