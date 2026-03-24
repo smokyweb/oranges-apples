@@ -61,8 +61,9 @@ workflows:
         APP_STORE_CONNECT_ISSUER_ID: 69a6de73-12f3-47e3-e053-5b8c7c11a4d1
         APP_APPLE_TEAM_ID: YQGQU3RV34
         BUNDLE_ID: com.orangestoapples.app
-        XCODE_PROJECT: "ios/OtaAppWork.xcodeproj"
-        XCODE_SCHEME: "OtaAppWork"
+        XCODE_PROJECT: "ios/Oranges_To_Apples.xcodeproj"
+        XCODE_WORKSPACE: "ios/Oranges_To_Apples.xcworkspace"
+        XCODE_SCHEME: "Oranges_To_Apples"
 
     scripts:
       - name: Install npm dependencies
@@ -90,7 +91,7 @@ workflows:
         script: |
           xcode-project use-profiles
           xcode-project build-ipa \
-            --project "$XCODE_PROJECT" \
+            --workspace "$XCODE_WORKSPACE" \
             --scheme "$XCODE_SCHEME"
 
     artifacts:
