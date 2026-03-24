@@ -53,6 +53,8 @@ workflows:
       node: 18.18.0
       xcode: latest
       cocoapods: default
+      groups:
+        - app_store_cred
       vars:
         APP_STORE_CONNECT_KEY_IDENTIFIER: 59WAASGLSX
         APP_STORE_CONNECT_ISSUER_ID: 69a6de73-12f3-47e3-e053-5b8c7c11a4d1
