@@ -85,46 +85,54 @@ workflows:
 
       - name: Build IPA for TestFlight
         script: |
-          # Write ASC private key to temp file for xcodebuild auth
+          set -e
           echo "$APP_STORE_CONNECT_PRIVATE_KEY" > /tmp/asc_key.p8
 
-          # Archive
+          ARCHIVE_PATH="$CM_BUILD_DIR/OTA.xcarchive"
+          EXPORT_PATH="$CM_BUILD_DIR/ipa"
+          mkdir -p "$EXPORT_PATH"
+
+          echo "=== Archiving ==="
           xcodebuild archive \
             -workspace "$XCODE_WORKSPACE" \
             -scheme "$XCODE_SCHEME" \
             -configuration Release \
-            -archivePath /tmp/OTA.xcarchive \
+            -archivePath "$ARCHIVE_PATH" \
             CODE_SIGN_STYLE=Automatic \
             DEVELOPMENT_TEAM="$APP_APPLE_TEAM_ID" \
             -allowProvisioningUpdates \
             -authenticationKeyPath /tmp/asc_key.p8 \
             -authenticationKeyID "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
-            | xcpretty
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
 
-          # Export IPA
-          cat > /tmp/export_options.plist << EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key><string>app-store</string>
-            <key>teamID</key><string>${APP_APPLE_TEAM_ID}</string>
-            <key>uploadBitcode</key><false/>
-            <key>uploadSymbols</key><true/>
-          </dict>
-          </plist>
-          EOF
+          echo "=== Archive done. Contents: ==="
+          ls -la "$ARCHIVE_PATH" || echo "Archive missing!"
 
+          cat > /tmp/export_options.plist << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>app-store</string>
+  <key>teamID</key><string>$APP_APPLE_TEAM_ID</string>
+  <key>uploadBitcode</key><false/>
+  <key>uploadSymbols</key><true/>
+</dict>
+</plist>
+PLIST
+
+          echo "=== Exporting IPA ==="
           xcodebuild -exportArchive \
-            -archivePath /tmp/OTA.xcarchive \
-            -exportPath build/ios/ipa \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
             -exportOptionsPlist /tmp/export_options.plist \
             -allowProvisioningUpdates \
             -authenticationKeyPath /tmp/asc_key.p8 \
             -authenticationKeyID "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
             -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
 
+          echo "=== Export contents: ==="
+          ls -la "$EXPORT_PATH"
           rm /tmp/asc_key.p8
 
       - name: Upload to TestFlight
@@ -133,8 +141,9 @@ workflows:
           mkdir -p ~/.appstoreconnect/private_keys
           echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
 
-          # Find IPA anywhere in the workspace
-          IPA=$(find ~ /tmp -name "*.ipa" 2>/dev/null | grep -v Pods | head -1)
+          # Find IPA in build dir first, then broader search
+          IPA=$(find "$CM_BUILD_DIR" -name "*.ipa" 2>/dev/null | head -1)
+          [ -z "$IPA" ] && IPA=$(find ~ /tmp /var -name "*.ipa" 2>/dev/null | grep -v Pods | head -1)
           echo "Found IPA: $IPA"
 
           if [ -z "$IPA" ]; then
@@ -151,7 +160,7 @@ workflows:
             --verbose
 
     artifacts:
-      - build/ios/ipa/*.ipa
+      - $CM_BUILD_DIR/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
 
     publishing:
