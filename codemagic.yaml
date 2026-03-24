@@ -1,4 +1,8 @@
 workflows:
+
+  # ─────────────────────────────────────────────
+  # Android Release APK
+  # ─────────────────────────────────────────────
   android-release:
     name: Android Release APK
     max_build_duration: 60
@@ -6,7 +10,7 @@ workflows:
       node: 18.18.0
       java: 17
       vars:
-        PACKAGE_NAME: "com.otaappwork"
+        PACKAGE_NAME: "com.orangestoapples.app"
     scripts:
       - name: Install dependencies
         script: npm install
@@ -30,6 +34,75 @@ workflows:
       - android/app/build/outputs/apk/release/*.apk
 
     publishing:
+      email:
+        recipients:
+          - kevin@bluestoneapps.com
+        notify:
+          success: true
+          failure: true
+
+  # ─────────────────────────────────────────────
+  # iOS TestFlight
+  # ─────────────────────────────────────────────
+  ios-testflight:
+    name: iOS TestFlight
+    max_build_duration: 90
+    integrations:
+      app_store_connect: Oranges to Apples ASC
+    environment:
+      node: 18.18.0
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.orangestoapples.app
+      vars:
+        APP_STORE_CONNECT_KEY_IDENTIFIER: 59WAASGLSX
+        APP_STORE_CONNECT_ISSUER_ID: 69a6de73-12f3-47e3-e053-5b8c7c11a4d1
+        APP_APPLE_TEAM_ID: YQGQU3RV34
+        BUNDLE_ID: com.orangestoapples.app
+        XCODE_PROJECT: "ios/OtaAppWork.xcodeproj"
+        XCODE_SCHEME: "OtaAppWork"
+
+    scripts:
+      - name: Install npm dependencies
+        script: npm install
+
+      - name: Install CocoaPods
+        script: |
+          cd ios
+          pod install
+
+      - name: Bundle JS for iOS
+        script: |
+          npx react-native bundle \
+            --platform ios \
+            --dev false \
+            --entry-file index.js \
+            --bundle-output ios/main.jsbundle \
+            --assets-dest ios/
+
+      - name: Set Xcode project team
+        script: |
+          sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = $APP_APPLE_TEAM_ID;/g" ios/*.xcodeproj/project.pbxproj || true
+
+      - name: Build IPA for TestFlight
+        script: |
+          xcode-project use-profiles
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        beta_groups:
+          - "External Testers"
       email:
         recipients:
           - kevin@bluestoneapps.com
