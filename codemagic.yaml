@@ -53,12 +53,11 @@ workflows:
       node: 20.18.0
       xcode: latest
       cocoapods: default
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.orangestoapples.app
       groups:
         - app_store_cred
       vars:
+        APP_STORE_CONNECT_KEY_IDENTIFIER: Z4742TC256
+        APP_STORE_CONNECT_ISSUER_ID: 69a6de73-12f3-47e3-e053-5b8c7c11a4d1
         APP_APPLE_TEAM_ID: YQGQU3RV34
         BUNDLE_ID: com.orangestoapples.app
         XCODE_WORKSPACE: "ios/Oranges_To_Apples.xcworkspace"
@@ -85,6 +84,24 @@ workflows:
       - name: Set Xcode project team
         script: |
           sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = $APP_APPLE_TEAM_ID;/g" ios/*.xcodeproj/project.pbxproj || true
+
+      - name: Fetch signing certificate and provisioning profile
+        script: |
+          keychain initialize
+          # Revoke any existing distribution certs so --create generates a fresh one with a new private key
+          app-store-connect certificates revoke \
+            --type IOS_DISTRIBUTION \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
+          # Create new cert + provisioning profile
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID"
+          keychain add-certificates
 
       - name: Build IPA for TestFlight
         script: |
