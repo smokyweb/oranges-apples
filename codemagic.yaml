@@ -127,6 +127,22 @@ workflows:
 
           rm /tmp/asc_key.p8
 
+      - name: Upload to TestFlight
+        script: |
+          # Write key for altool upload
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
+
+          IPA=$(find build/ios/ipa -name "*.ipa" | head -1)
+          echo "Uploading: $IPA"
+
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA" \
+            --apiKey "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --verbose
+
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
