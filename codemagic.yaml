@@ -88,6 +88,25 @@ workflows:
           set -e
           keychain initialize
 
+          # Revoke any existing IOS_DISTRIBUTION certs so we can create a fresh one
+          app-store-connect certificates list \
+            --type IOS_DISTRIBUTION \
+            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+            --json \
+          | python3 -c "
+import json, sys
+certs = json.load(sys.stdin)
+for c in certs: print(c['id'])
+" | while read cert_id; do
+              echo "Revoking cert: $cert_id"
+              app-store-connect certificates revoke "$cert_id" \
+                --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
+                --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+                --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
+            done
+
           # Generate a fresh RSA private key — this becomes the new cert's private key
           openssl genrsa -out /tmp/cert_key.pem 2048
           echo "Generated new RSA key"
