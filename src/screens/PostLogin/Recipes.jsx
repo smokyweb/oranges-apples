@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback, memo } from 'react';
 import {
   StyleSheet,
   Text,
@@ -48,6 +48,32 @@ const Recipes = () => {
   console.log('Recipes====>>>', JSON.stringify(recipes))
   const [activeTab, setActiveTab] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [selectedCategories, setSelectedCategories] = useState([]);
+
+  const RECIPE_CATEGORIES = [
+    'Chicken', 'Beef', 'Pork', 'Fish & Seafood',
+    'Beans & Legumes', 'Rice & Grains', 'Vegetables',
+    'Fruits', 'Soups & Stews', 'Salads', 'Breakfast', 'Snacks',
+  ];
+
+  // Only filter obvious alcoholic drink recipes by name — not cooking recipes that use wine/beer as ingredients
+  const DRINK_LABELS = ['cocktail', 'sangria', 'mimosa', 'margarita', 'daiquiri', 'boozy', 'alcoholic drink'];
+
+  const filterRecipes = (items) => {
+    if (!items || !Array.isArray(items)) return [];
+    return items.filter(item => {
+      const recipe = item.recipe || item.recipe_details || item;
+      const label = (recipe?.label || '').toLowerCase();
+      return !DRINK_LABELS.some(kw => label.includes(kw));
+    });
+  };
+
+  const toggleCategory = (cat) => {
+    setSelectedCategories(prev =>
+      prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
+    );
+  };
   const [debounceTimeout, setDebounceTimeout] = useState(null);
   const [isPaginating, setIsPaginating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -77,7 +103,7 @@ const Recipes = () => {
   const handleFilterSelect = (filter) => {
     setActiveFilter(filter.value);
     setIsFilterVisible(false);
-    const query = filter.value || searchQuery.trim() || 'All';
+    const query = filter.value || searchQuery.trim() || 'healthy';
     safeDispatch(getRecipes(query));
   };
 
@@ -98,7 +124,7 @@ const Recipes = () => {
   const onRefresh = React.useCallback(async () => {
     setRefreshing(true);
     if (activeTab === 'All') {
-      await safeDispatch(getRecipes(searchQuery.trim() || 'All'));
+      await safeDispatch(getRecipes(searchQuery.trim() || 'healthy'));
     } else if (activeTab === 'Saved Recipes') {
       await safeDispatch(getSavedRecipes());
     } else if (activeTab === 'My Meals') {
@@ -115,7 +141,7 @@ const Recipes = () => {
     }
 
     const timeout = setTimeout(() => {
-      const query = text.trim() || 'All';
+      const query = text.trim() || 'healthy';
       safeDispatch(getRecipes(query));
     }, 500);
 
@@ -133,7 +159,7 @@ const Recipes = () => {
     if (isFocused) {
       if (activeTab === 'All') {
         if (!searchQuery) {
-          safeDispatch(getRecipes(activeTab));
+          safeDispatch(getRecipes('healthy'));
         }
       } else if (activeTab === 'Saved Recipes') {
         safeDispatch(getSavedRecipes());
@@ -194,7 +220,7 @@ const Recipes = () => {
     return null;
   };
 
-  const renderRecipeCard = ({ item }) => {
+  const renderRecipeCard = useCallback(({ item }) => {
     // Handle both Edamam structure (item.recipe) and local structure (item directly or item.recipe_details)
     const recipe = item.recipe || item.recipe_details || item;
 
@@ -216,6 +242,7 @@ const Recipes = () => {
             source={{ uri: recipe.image }}
             style={styles.recipeImage}
             defaultSource={images.recipe}
+            fadeDuration={0}
             onError={(error) => console.log('Image load error:', error.nativeEvent.error)}
           />
           <TouchableOpacity style={styles.favoriteBtn}>
@@ -243,7 +270,7 @@ const Recipes = () => {
         </View>
       </Pressable>
     )
-  };
+  }, [handleAddToShoppingList]);
 
   return (
     <WrapperContainer>
@@ -307,7 +334,7 @@ const Recipes = () => {
           <ActivityIndicator size="large" color="#28C76F" />
           <Text style={styles.loadingText}>Loading {activeTab === 'My Meals' ? 'meals' : 'recipes'}...</Text>
         </View>
-      ) : recipesLoading === LoadingStatus.FAILED || (!recipes?.hits?.length && !recipes?.data?.length && !recipes?.data?.data?.length) ? (
+      ) : recipesLoading === LoadingStatus.FAILED || (!recipes?.hits?.length && !recipes?.data?.recipes?.hits?.length && !recipes?.data?.data?.length) ? (
         <View style={styles.loadingContainer}>
           <CustomIcon
             origin={ICON_TYPE.FEATHER_ICONS}
@@ -321,7 +348,7 @@ const Recipes = () => {
         </View>
       ) : (
         <FlatList
-          data={recipes?.hits || recipes?.data?.data || recipes?.data || []}
+          data={filterRecipes(recipes?.hits || recipes?.data?.recipes?.hits || recipes?.data?.data || recipes?.data || [])}
           renderItem={renderRecipeCard}
           keyExtractor={(item, index) => {
             const recipe = item.recipe || item.recipe_details || item;
@@ -334,6 +361,10 @@ const Recipes = () => {
           onEndReached={loadMoreRecipes}
           onEndReachedThreshold={0.1}
           ListFooterComponent={renderFooter}
+          initialNumToRender={10}
+          maxToRenderPerBatch={6}
+          windowSize={15}
+          removeClippedSubviews={false}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
           }

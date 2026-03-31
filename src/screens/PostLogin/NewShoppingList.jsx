@@ -9,6 +9,8 @@ import {
   Modal,
   Pressable,
   TextInput,
+  Switch,
+  Platform,
 } from 'react-native';
 import { useDispatch, useSelector } from 'react-redux';
 import WrapperContainer from '../../components/WrapperContainer';
@@ -70,11 +72,15 @@ const getNutrientColor = (key) => {
   }
 };
 
-const NutrientGaugeBar = ({ nutrientKey, target, unit, current = 0 }) => {
+const NutrientGaugeBar = ({ nutrientKey, target, unit, current = 0, dailyTarget = 0, days = 1 }) => {
   const fillPercent = target > 0 ? Math.min(100, (current / target) * 100) : 0;
-  const barColor = fillPercent >= 75 ? '#28C76F' : fillPercent >= 25 ? '#F59E0B' : '#EF4444';
+  const barColor = fillPercent >= 100 ? '#16A34A' : fillPercent >= 75 ? '#28C76F' : fillPercent >= 25 ? '#F59E0B' : '#EF4444';
   const baseColor = getNutrientColor(nutrientKey);
   const activeColor = current > 0 ? barColor : baseColor;
+
+  // Days-based display: how many days of this nutrient does the selection cover?
+  const daysCovered = dailyTarget > 0 ? current / dailyTarget : 0;
+  const daysRounded = Math.round(daysCovered * 10) / 10;
 
   return (
     <View style={gaugeStyles.container}>
@@ -83,23 +89,29 @@ const NutrientGaugeBar = ({ nutrientKey, target, unit, current = 0 }) => {
         <Text style={gaugeStyles.label}>{nutrientKey.replace(/_/g, ' ')}</Text>
         <Text style={gaugeStyles.target}>
           {current > 0
-            ? `${Math.round(current * 10) / 10} / ${target} ${unit}`
-            : `${target} ${unit} target`}
+            ? `${daysRounded} / ${days} days`
+            : `${days} days needed`}
         </Text>
       </View>
       <View style={gaugeStyles.track}>
-        <View style={[gaugeStyles.fill, { width: `${Math.max(fillPercent, 3)}%`, backgroundColor: activeColor }]} />
+        <View style={[gaugeStyles.fill, { width: `${Math.max(fillPercent, 2)}%`, backgroundColor: activeColor }]} />
       </View>
+      {current > 0 && (
+        <Text style={gaugeStyles.rawAmount}>
+          {Math.round(current * 10) / 10} {unit} of {Math.round(target * 10) / 10} {unit} target
+        </Text>
+      )}
     </View>
   );
 };
 
 const gaugeStyles = StyleSheet.create({
-  container: { marginBottom: 10, paddingHorizontal: 2 },
-  labelRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  container: { marginBottom: 12, paddingHorizontal: 2 },
+  labelRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
   emoji: { fontSize: 16, marginRight: 6 },
   label: { fontSize: 14, fontWeight: '700', color: '#1F2937', flex: 1 },
-  target: { fontSize: 11, color: '#6B7280', fontWeight: '500' },
+  target: { fontSize: 11, color: '#6B7280', fontWeight: '600' },
+  rawAmount: { fontSize: 10, color: '#9CA3AF', marginTop: 2, textAlign: 'right' },
   track: {
     height: 10,
     backgroundColor: '#E5E7EB',
@@ -133,8 +145,26 @@ const NewShoppingList = ({ navigation, route }) => {
   const { editMode = false, listData = null, openModal = false } = route?.params || {};
 
   const [listName, setListName] = useState(editMode ? listData?.name || '' : '');
-  const [budget, setBudget] = useState(editMode ? listData?.budget?.toString() || '0' : '0');
+  const [budget, setBudget] = useState(editMode ? listData?.budget?.toString() || '100' : '100');
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
   const [days, setDays] = useState(editMode ? Number(listData?.timeline) || 7 : 7);
+
+  // Supplemental assistance & dietary preferences
+  const [snapEnabled, setSnapEnabled] = useState(false);
+  const [wicEnabled, setWicEnabled] = useState(false);
+  const [foodPreference, setFoodPreference] = useState('');
+  const [selectedAllergies, setSelectedAllergies] = useState([]);
+  const [showFoodPrefDropdown, setShowFoodPrefDropdown] = useState(false);
+  const [showAllergyDropdown, setShowAllergyDropdown] = useState(false);
+
+  const FOOD_PREFERENCES = ['None', 'Omnivore', 'Vegetarian', 'Vegan', 'Pescatarian', 'Keto', 'Paleo'];
+  const ALLERGY_OPTIONS = ['Gluten', 'Dairy', 'Nuts', 'Shellfish', 'Eggs', 'Soy'];
+
+  const toggleAllergy = (allergy) => {
+    setSelectedAllergies(prev =>
+      prev.includes(allergy) ? prev.filter(a => a !== allergy) : [...prev, allergy]
+    );
+  };
   const [selectedNutritionFocus, setSelectedNutritionFocus] = useState(() => {
     if (editMode) {
       if (Array.isArray(listData?.nutrition_focus)) {
@@ -171,6 +201,7 @@ const NewShoppingList = ({ navigation, route }) => {
 
   const getFoodQty = (fdcId) => foodQuantities[fdcId] || 1;
   const setFoodQty = (fdcId, qty) => setFoodQuantities(prev => ({ ...prev, [fdcId]: Math.max(1, qty) }));
+  const updateFoodQty = (fdcId, delta) => setFoodQty(fdcId, getFoodQty(fdcId) + delta);
 
   // Manual food search
   const [showManualSearch, setShowManualSearch] = useState(false);
@@ -484,17 +515,47 @@ const NewShoppingList = ({ navigation, route }) => {
         });
       });
 
-      if (!allDescriptions.length) return;
+      if (!allDescriptions.length) {
+        setIsAutoGenerating(false); // nothing to price — lift loader immediately
+        return;
+      }
 
       const total = allDescriptions.length;
       let resolved = 0;
+      const cumulativePriceMap = {}; // accumulates prices as each request resolves
+
+      // Safety: if prices never finish (network issue), lift loader after 30s
+      const loaderTimeout = setTimeout(() => setIsAutoGenerating(false), 30000);
 
       // Fire one request per unique description — all simultaneously,
       // each updates the UI the moment it resolves (no waiting on others)
       allDescriptions.forEach(desc => {
         const onDone = (priceMap) => {
+          // Accumulate into the shared map
+          Object.assign(cumulativePriceMap, priceMap);
           resolved++;
           applyPartialPrices(priceMap, resolved === total);
+
+          // When ALL prices are in, run auto-generation with full live data
+          if (resolved === total) {
+            const foodPool = {};
+            Object.values(nutrientFoodsMap).forEach(foods => {
+              foods.forEach(f => {
+                if (f.fdcId && !foodPool[f.fdcId]) {
+                  const priceData = cumulativePriceMap[f.description];
+                  const enriched = priceData
+                    ? { ...f, storePrice: priceData.price, storeProduct: priceData.product, storePriceLoading: false }
+                    : { ...f, storePriceLoading: false };
+                  if (enriched.storePrice != null && enriched.storePrice !== 'N/A' && parseFloat(enriched.storePrice) > 0) {
+                    foodPool[f.fdcId] = enriched;
+                  }
+                }
+              });
+            });
+            // Prices done loading — lift the overlay. No auto-select; user picks manually.
+            clearTimeout(loaderTimeout);
+            setIsAutoGenerating(false);
+          }
         };
 
         if (store === STORE_WALMART) {
@@ -548,10 +609,18 @@ const NewShoppingList = ({ navigation, route }) => {
       // Only reload food products if we don't have data yet (preserve selections on re-open)
       const hasData = Object.keys(allNutrientProducts).length > 0;
       if (!hasData) {
-        setSelectedNutrientKey(null);
+        // Start on first nutrient
+        const _s = summary?.length > 0 ? summary : [];
+        const _m = mergeWithDefaults(_s);
+        const _first = (_m.length > 0 ? _m : DEFAULT_NUTRIENT_TARGETS)[0];
+        setSelectedNutrientKey(_first?.nutrient_key || null);
         setFoodsForNutrient([]);
         setFoodsError('');
+        setIsAutoGenerating(true);
         loadAllNutrients(summary, selectedStore);
+      } else {
+        // Re-opening — keep selected nutrient, just make sure one is set
+        setSelectedNutrientKey(prev => prev || DEFAULT_NUTRIENT_TARGETS[0]?.nutrient_key || null);
       }
     });
   };
@@ -834,6 +903,125 @@ const NewShoppingList = ({ navigation, route }) => {
     return total;
   }, [selectedFoodIds, allNutrientProducts, manualSearchResults, foodsForNutrient, foodQuantities]);
 
+  // Helper: estimate cost to independently cover a nutrient target using cheapest food
+  const cheapestCostForNutrient = (nutrientKey, totalNeeded, foods) => {
+    let minCost = Infinity;
+    foods.forEach(food => {
+      const price = parseFloat(food.storePrice) || 0;
+      if (price <= 0) return;
+      const portionGrams = food.portionGrams || 100;
+      const amtPer100g = food.allNutrients?.[nutrientKey]?.amount || 0;
+      const contribution = (amtPer100g / 100) * portionGrams;
+      if (contribution <= 0) return;
+      const servings = Math.ceil(totalNeeded / contribution);
+      const cost = price * servings;
+      if (cost < minCost) minCost = cost;
+    });
+    return minCost === Infinity ? 0 : minCost;
+  };
+
+  // Auto-generate the cheapest list that covers all nutrient targets.
+  // Accepts explicit foodsPool so it never reads stale state (avoids closure bugs).
+  // budgetLimit: max total spend in dollars (0 = no cap).
+  const autoGenerateList = (nutrientTargets, foodsPool, budgetLimit = 0) => {
+    const allFoods = Object.values(foodsPool || {});
+    if (!allFoods.length || !nutrientTargets?.length) return;
+
+    const periodDays = days || 7;
+
+    // remaining[key] = total amount still needed for the period (starts at daily × days)
+    const remaining = {};
+    nutrientTargets.forEach(t => {
+      remaining[t.nutrient_key] = (t.total_target_value || 0) * periodDays;
+    });
+
+    // Sort nutrients by their individual cost-to-cover (most expensive first)
+    // so the most critical needs are addressed before cheaper ones
+    const nutrientOrder = [...nutrientTargets].sort((a, b) => {
+      const costA = cheapestCostForNutrient(a.nutrient_key, a.total_target_value * periodDays, allFoods);
+      const costB = cheapestCostForNutrient(b.nutrient_key, b.total_target_value * periodDays, allFoods);
+      return costB - costA; // most expensive first
+    });
+
+    const selected = {}; // fdcId -> qty
+    let totalSpentSoFar = 0; // running cost total for budget cap
+
+    nutrientOrder.forEach(({ nutrient_key }) => {
+      if ((remaining[nutrient_key] || 0) <= 0) return; // already covered by earlier selections
+
+      // Find cheapest food per unit of this nutrient (among remaining priced foods)
+      let bestFood = null;
+      let bestRatio = Infinity;
+
+      allFoods.forEach(food => {
+        const price = parseFloat(food.storePrice) || 0;
+        if (price <= 0) return;
+        const portionGrams = food.portionGrams || 100;
+        const amtPer100g = food.allNutrients?.[nutrient_key]?.amount || 0;
+        const contribution = (amtPer100g / 100) * portionGrams;
+        if (contribution <= 0) return;
+        const ratio = price / contribution; // $ per unit of nutrient
+        if (ratio < bestRatio) {
+          bestRatio = ratio;
+          bestFood = food;
+        }
+      });
+
+      if (!bestFood) return;
+
+      const portionGrams = bestFood.portionGrams || 100;
+      const foodPrice = parseFloat(bestFood.storePrice) || 0;
+
+      // How many servings to fully cover this nutrient's remaining need?
+      const amtPer100g = bestFood.allNutrients?.[nutrient_key]?.amount || 0;
+      const contributionPerServing = (amtPer100g / 100) * portionGrams;
+      const servingsNeeded = contributionPerServing > 0
+        ? Math.ceil(remaining[nutrient_key] / contributionPerServing)
+        : 1;
+      let qty = Math.min(Math.max(servingsNeeded, 1), 15);
+
+      // If already selected (from a prior nutrient step), increase qty if needed
+      const existingQty = selected[bestFood.fdcId] || 0;
+      let finalQty = Math.max(existingQty, qty);
+
+      // Budget cap: don't exceed the limit
+      if (budgetLimit > 0 && foodPrice > 0) {
+        // How much budget remains after existing selections?
+        const existingCost = existingQty * foodPrice;
+        const budgetRemaining = budgetLimit - (totalSpentSoFar - existingCost);
+        const maxAffordableQty = Math.floor(budgetRemaining / foodPrice);
+        if (maxAffordableQty <= 0) {
+          // Can't afford any — skip this food if not already selected
+          if (existingQty === 0) return;
+          finalQty = existingQty; // keep what we already have
+        } else {
+          finalQty = Math.min(finalQty, Math.max(existingQty, maxAffordableQty));
+        }
+      }
+
+      selected[bestFood.fdcId] = finalQty;
+      // Update running cost (net delta vs existing)
+      totalSpentSoFar += (finalQty - existingQty) * foodPrice;
+
+      // Reduce remaining for ALL nutrients this food covers (cross-nutrient benefit)
+      const actualQty = finalQty;
+      Object.keys(remaining).forEach(key => {
+        const a = (bestFood.allNutrients?.[key]?.amount || 0);
+        const c = (a / 100) * portionGrams * actualQty;
+        remaining[key] = Math.max(0, (remaining[key] || 0) - c);
+      });
+    });
+
+    if (Object.keys(selected).length > 0) {
+      setSelectedFoodIds(prev => ({
+        ...prev,
+        ...Object.fromEntries(Object.entries(selected).map(([id]) => [id, true])),
+      }));
+      setFoodQuantities(prev => ({ ...prev, ...selected }));
+    }
+    setIsAutoGenerating(false); // lift the loading overlay
+  };
+
   const handleAddSelectedFoods = async () => {
     let targetList = currentList || listData;
 
@@ -1064,104 +1252,9 @@ const NewShoppingList = ({ navigation, route }) => {
             onChangeText={setListName}
           />
 
-          {/* Budget Input Container */}
-          <View style={styles.budgetInputWrapper}>
-            <CustomInput
-              placeholder="0.00"
-              keyboardType="numeric"
-              value={budget}
-              onChangeText={text => {
-                // Allow only numeric + decimal
-                const cleaned = text.replace(/[^0-9.]/g, '');
-                setBudget(cleaned);
-              }}
-              onFocus={() => {
-                if (budget === '0' || budget === '0.00') setBudget('');
-              }}
-              onBlur={() => {
-                if (!budget || budget.trim() === '') setBudget('0');
-              }}
-              leftIcon={<Text style={styles.currencySymbol}>$</Text>}
-              inputStyle={{ paddingRight: moderateScale(70) }}
-            />
-            <Text style={styles.budgetSuffix}>Budget</Text>
-          </View>
         </View>
 
-        {/* Timeline Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Timeline</Text>
-          <View style={styles.stepperContainer}>
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => updateDays('minus')}
-            >
-              <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name="minus" size={24} color="#1F2937" />
-            </TouchableOpacity>
 
-            <View style={styles.daysDisplay}>
-              <Text style={styles.daysNumber}>{days}</Text>
-              <Text style={styles.daysText}>days</Text>
-            </View>
-
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => updateDays('plus')}
-            >
-              <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name="plus" size={24} color="#1F2937" />
-            </TouchableOpacity>
-          </View>
-          {/* <Text style={styles.estimateText}>estimated meals: {days * 3}</Text> */}
-        </View>
-
-        {/* Nutrition Focus Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Nutrition Focus</Text>
-          <Text style={styles.sectionSubLabel}>We'll prioritize these</Text>
-          <TouchableOpacity
-            style={styles.dropdown}
-            onPress={() => setShowDropdown(!showDropdown)}
-          >
-            <Text style={styles.dropdownText}>{nutritionFocusLabel}</Text>
-            <CustomIcon
-              origin={ICON_TYPE.FEATHER_ICONS}
-              name={showDropdown ? "chevron-up" : "chevron-down"}
-              size={20}
-              color="#9CA3AF"
-            />
-          </TouchableOpacity>
-
-          {showDropdown && (
-            <>
-              <TouchableOpacity
-                style={styles.dropdownOverlay}
-                onPress={() => setShowDropdown(false)}
-                activeOpacity={1}
-              />
-              <View style={styles.dropdownList}>
-                {nutritionOptions.map((option) => (
-                  <TouchableOpacity
-                    key={option}
-                    style={styles.dropdownItem}
-                    onPress={() => toggleNutritionOption(option)}
-                  >
-                    <Text
-                      style={[
-                        styles.dropdownItemText,
-                        selectedNutritionFocus.includes(option) && styles.selectedText,
-                      ]}
-                    >
-                      {option}
-                    </Text>
-                    {selectedNutritionFocus.includes(option) && (
-                      <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name="check" size={16} color="#28C76F" />
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </>
-          )}
-        </View>
         {/* Action Button */}
         <View style={styles.footer}>
           <TouchableOpacity
@@ -1175,6 +1268,95 @@ const NewShoppingList = ({ navigation, route }) => {
               <Text style={styles.createBtnText}>{editMode ? 'Update Shopping List' : 'Continue →'}</Text>
             )}
           </TouchableOpacity>
+        </View>
+
+        {/* Assistance Programs */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Assistance Programs</Text>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleLabel}>SNAP</Text>
+              <Text style={styles.toggleSub}>Supplemental Nutrition Assistance</Text>
+            </View>
+            <Switch
+              value={snapEnabled}
+              onValueChange={setSnapEnabled}
+              trackColor={{ false: '#E5E7EB', true: '#86EFAC' }}
+              thumbColor={snapEnabled ? '#28C76F' : '#9CA3AF'}
+            />
+          </View>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleLabel}>WIC</Text>
+              <Text style={styles.toggleSub}>Women, Infants & Children</Text>
+            </View>
+            <Switch
+              value={wicEnabled}
+              onValueChange={setWicEnabled}
+              trackColor={{ false: '#E5E7EB', true: '#86EFAC' }}
+              thumbColor={wicEnabled ? '#28C76F' : '#9CA3AF'}
+            />
+          </View>
+        </View>
+
+        {/* Food Preferences */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Food Preferences</Text>
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => { setShowFoodPrefDropdown(!showFoodPrefDropdown); setShowAllergyDropdown(false); }}
+          >
+            <Text style={styles.dropdownText}>{foodPreference || 'Select preference...'}</Text>
+            <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name={showFoodPrefDropdown ? 'chevron-up' : 'chevron-down'} size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+          {showFoodPrefDropdown && (
+            <>
+              <TouchableOpacity style={styles.dropdownOverlay} onPress={() => setShowFoodPrefDropdown(false)} activeOpacity={1} />
+              <View style={styles.dropdownList}>
+                {FOOD_PREFERENCES.map(opt => (
+                  <TouchableOpacity
+                    key={opt}
+                    style={styles.dropdownItem}
+                    onPress={() => { setFoodPreference(opt === 'None' ? '' : opt); setShowFoodPrefDropdown(false); }}
+                  >
+                    <Text style={[styles.dropdownItemText, foodPreference === opt && styles.selectedText]}>{opt}</Text>
+                    {foodPreference === opt && <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name="check" size={16} color="#28C76F" />}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
+        </View>
+
+        {/* Allergies */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Allergies</Text>
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => { setShowAllergyDropdown(!showAllergyDropdown); setShowFoodPrefDropdown(false); }}
+          >
+            <Text style={styles.dropdownText}>
+              {selectedAllergies.length ? selectedAllergies.join(', ') : 'Select allergies...'}
+            </Text>
+            <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name={showAllergyDropdown ? 'chevron-up' : 'chevron-down'} size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+          {showAllergyDropdown && (
+            <>
+              <TouchableOpacity style={styles.dropdownOverlay} onPress={() => setShowAllergyDropdown(false)} activeOpacity={1} />
+              <View style={styles.dropdownList}>
+                {ALLERGY_OPTIONS.map(opt => (
+                  <TouchableOpacity
+                    key={opt}
+                    style={styles.dropdownItem}
+                    onPress={() => toggleAllergy(opt)}
+                  >
+                    <Text style={[styles.dropdownItemText, selectedAllergies.includes(opt) && styles.selectedText]}>{opt}-free</Text>
+                    {selectedAllergies.includes(opt) && <CustomIcon origin={ICON_TYPE.FEATHER_ICONS} name="check" size={16} color="#28C76F" />}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
         </View>
 
         <Spacer height={verticalScale(40)} />
@@ -1210,69 +1392,233 @@ const NewShoppingList = ({ navigation, route }) => {
         >
           <Pressable style={styles.nutritionModalContent} onPress={e => e.stopPropagation()}>
             {/* Header */}
-            <View style={styles.nutritionModalHeader}>
-              <Text style={styles.nutritionModalTitle}>Smart Suggestions ⛽</Text>
-              <TouchableOpacity
-                onPress={() => setShowNutritionModal(false)}
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              >
-                <CustomIcon origin={ICON_TYPE.IONICONS} name="close" size={24} color="#1F2937" />
-              </TouchableOpacity>
+            {(() => {
+              const _summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
+              const _merged = mergeWithDefaults(_summary);
+              const _targets = _merged.length > 0 ? _merged : DEFAULT_NUTRIENT_TARGETS;
+              const _activeIdx = _targets.findIndex(t => t.nutrient_key === selectedNutrientKey);
+              const _idx = _activeIdx >= 0 ? _activeIdx : 0;
+              return (
+                <View style={styles.nutritionModalHeader}>
+                  <TouchableOpacity onPress={() => setShowNutritionModal(false)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                    <CustomIcon origin={ICON_TYPE.IONICONS} name="close" size={24} color="#1F2937" />
+                  </TouchableOpacity>
+                  <Text style={styles.nutritionModalTitle}>Smart Suggestions ⛽</Text>
+                  <Text style={styles.nutrientCounter}>{_idx + 1} / {_targets.length}</Text>
+                </View>
+              );
+            })()}
+
+            {/* Budget row */}
+            <View style={styles.modalBudgetRow}>
+              <Text style={styles.modalBudgetLabel}>💰 Budget</Text>
+              <View style={styles.modalBudgetInputWrap}>
+                <Text style={styles.modalBudgetCurrency}>$</Text>
+                <TextInput
+                  style={styles.modalBudgetInput}
+                  keyboardType="numeric"
+                  value={budget}
+                  onChangeText={text => setBudget(text.replace(/[^0-9.]/g, ''))}
+                  onFocus={() => { if (budget === '0' || budget === '100') setBudget(''); }}
+                  onBlur={() => { if (!budget || budget === '') setBudget('100'); }}
+                  placeholder="100"
+                  placeholderTextColor="#9CA3AF"
+                />
+              </View>
+              <Text style={styles.modalBudgetHint}>for {days || 7} days</Text>
+              <View style={{ flex: 1 }} />
+              {/* Cart total inline */}
+              {(() => {
+                const budgetNum = parseFloat(budget) || 0;
+                const over = budgetNum > 0 && cartTotal > budgetNum;
+                return (
+                  <Text style={[styles.modalBudgetCart, over && { color: '#EF4444' }]}>
+                    Cart: ${cartTotal.toFixed(2)}{budgetNum > 0 ? ` / $${budgetNum.toFixed(2)}` : ''}
+                  </Text>
+                );
+              })()}
             </View>
 
-            {/* Store Selector hidden — Walmart only for now */}
-
-            {/* Budget Tracker */}
+            {/* Single-nutrient view — no scroll */}
             {(() => {
-              const budgetNum = parseFloat(budget) || 0;
-              const overBudget = budgetNum > 0 && cartTotal > budgetNum;
-              const fillPct = budgetNum > 0 ? Math.min(cartTotal / budgetNum, 1) * 100 : 0;
-              const barColor = overBudget ? '#EF4444' : cartTotal > 0 ? '#28C76F' : '#D1D5DB';
+              const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
+              const merged = mergeWithDefaults(summary);
+              const targets = merged.length > 0 ? merged : DEFAULT_NUTRIENT_TARGETS;
+              const activeIdx = Math.max(0, targets.findIndex(t => t.nutrient_key === selectedNutrientKey));
+              const item = targets[activeIdx] || targets[0];
+              const key = item?.nutrient_key;
+              const nutrientData = allNutrientProducts[key];
+              const isLoadingNutrient = !nutrientData || nutrientData.loading;
+
+              // Top 20 cheapest priced foods for this nutrient
+              const allFoods = nutrientData?.foods || [];
+              const pricedFoods = allFoods
+                .filter(f => f.storePrice != null && f.storePrice !== 'N/A' && parseFloat(f.storePrice) > 0)
+                .sort((a, b) => parseFloat(a.storePrice) - parseFloat(b.storePrice))
+                .slice(0, 20);
+              // If prices not yet loaded, show top 20 by nutrient content
+              const displayFoods = pricedFoods.length > 0 ? pricedFoods : allFoods.slice(0, 20);
+
+              // Current value for this nutrient from selected foods
+              const currentNutrient = (() => {
+                const seen = new Set();
+                let total = 0;
+                const allPools = [
+                  ...Object.values(allNutrientProducts).flatMap(s => s.foods || []),
+                  ...manualSearchResults,
+                ];
+                allPools.forEach(f => {
+                  if (selectedFoodIds[f.fdcId] && !seen.has(f.fdcId)) {
+                    seen.add(f.fdcId);
+                    const qty = foodQuantities[f.fdcId] || 1;
+                    const portionGrams = f.portionGrams || 100;
+                    const amountPer100g = f.allNutrients?.[key]?.amount || 0;
+                    total += (amountPer100g / 100) * portionGrams * qty;
+                  }
+                });
+                return total;
+              })();
+
+              const goNext = () => {
+                const nextIdx = (activeIdx + 1) % targets.length;
+                setSelectedNutrientKey(targets[nextIdx].nutrient_key);
+              };
+              const goPrev = () => {
+                const prevIdx = (activeIdx - 1 + targets.length) % targets.length;
+                setSelectedNutrientKey(targets[prevIdx].nutrient_key);
+              };
+
               return (
-                <View style={styles.budgetTrackerRow}>
-                  <View style={styles.budgetTrackerLabels}>
-                    <Text style={styles.budgetTrackerCart}>
-                      Cart: <Text style={{ color: overBudget ? '#EF4444' : '#28C76F', fontWeight: '700' }}>
-                        ${cartTotal.toFixed(2)}
-                      </Text>
-                    </Text>
-                    <Text style={styles.budgetTrackerLimit}>
-                      {budgetNum > 0 ? `Budget: $${budgetNum.toFixed(2)}` : 'No budget set'}
-                    </Text>
+                <View style={styles.singleNutrientView}>
+                  {/* Gauge */}
+                  <View style={styles.singleNutrientGaugeBox}>
+                    <NutrientGaugeBar
+                      nutrientKey={key}
+                      target={(item?.total_target_value || 0) * (days || 1)}
+                      dailyTarget={item?.total_target_value || 0}
+                      days={days || 1}
+                      unit={item?.unit}
+                      current={currentNutrient}
+                    />
                   </View>
-                  {budgetNum > 0 && (
-                    <View style={styles.budgetTrackerBar}>
-                      <View style={[styles.budgetTrackerFill, { width: `${fillPct}%`, backgroundColor: barColor }]} />
+
+                  {/* Nav arrows */}
+                  <View style={styles.nutrientNavRow}>
+                    <TouchableOpacity style={styles.nutrientNavBtn} onPress={goPrev}>
+                      <CustomIcon origin={ICON_TYPE.IONICONS} name="chevron-back" size={20} color="#374151" />
+                      <Text style={styles.nutrientNavText}>Prev</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.nutrientNavName}>{key?.replace(/_/g, ' ')}</Text>
+                    <TouchableOpacity style={styles.nutrientNavBtn} onPress={goNext}>
+                      <Text style={styles.nutrientNavText}>Next</Text>
+                      <CustomIcon origin={ICON_TYPE.IONICONS} name="chevron-forward" size={20} color="#374151" />
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* 5 recommendation cards */}
+                  {isLoadingNutrient ? (
+                    <View style={styles.nutrientLoadingBox}>
+                      <ActivityIndicator size="large" color="#28C76F" />
+                      <Text style={styles.nutrientLoadingText}>Loading recommendations...</Text>
                     </View>
-                  )}
-                  {overBudget && (
-                    <Text style={styles.budgetTrackerOver}>
-                      ⚠ Over budget by ${(cartTotal - budgetNum).toFixed(2)}
-                    </Text>
+                  ) : displayFoods.length === 0 ? (
+                    <View style={styles.nutrientLoadingBox}>
+                      <Text style={styles.noDataText}>No products found for this nutrient.</Text>
+                    </View>
+                  ) : (
+                    <ScrollView
+                      style={styles.recListScroll}
+                      showsVerticalScrollIndicator={true}
+                      keyboardShouldPersistTaps="handled"
+                    >
+                      {displayFoods.map((food, idx) => {
+                        const isSelected = !!selectedFoodIds[food.fdcId];
+                        const qty = getFoodQty(food.fdcId);
+                        const portionGrams = food.portionGrams || 100;
+                        const rawAmt = food.nutrients?.[0]?.amount || 0;
+                        const nutrientAmt = rawAmt > 0 ? Math.round((rawAmt / 100) * portionGrams * 10) / 10 : null;
+                        const nutrientUnit = food.nutrients?.[0]?.unit || '';
+                        const unitPrice = food.storePrice != null && food.storePrice !== 'N/A'
+                          ? Number(food.storePrice) : null;
+                        const totalPrice = unitPrice != null ? (unitPrice * qty).toFixed(2) : null;
+
+                        const TRACKED = ['PROTEIN','CARBS','FAT','FIBER','CALCIUM','IRON','MAGNEISUM','ZINC','POTASIUM','VIT A','VIT C','VIT D','VIT E','VIT K','VIT B6','FOLATE','VIT B12','SODIUM'];
+                        const covers = TRACKED.filter(k => {
+                          if (k === key) return false;
+                          const amt = (food.allNutrients?.[k]?.amount || 0) / 100 * portionGrams;
+                          const tgt = DEFAULT_NUTRIENT_TARGETS.find(t => t.nutrient_key === k)?.total_target_value || 0;
+                          return tgt > 0 && (amt / tgt) >= 0.05;
+                        });
+
+                        return (
+                          <TouchableOpacity
+                            key={food.fdcId}
+                            style={[styles.recRow, isSelected && styles.recRowSelected]}
+                            onPress={() => toggleFoodSelection(food.fdcId)}
+                            activeOpacity={0.8}
+                          >
+                            {/* Rank badge */}
+                            <Text style={styles.recRank}>{idx + 1}</Text>
+
+                            {/* Checkbox */}
+                            <CustomIcon origin={ICON_TYPE.IONICONS}
+                              name={isSelected ? 'checkbox' : 'square-outline'}
+                              size={18} color={isSelected ? '#28C76F' : '#D1D5DB'}
+                              style={{ marginRight: 8 }} />
+
+                            {/* Name + sub info */}
+                            <View style={styles.recRowMid}>
+                              <Text style={styles.recRowName} numberOfLines={1}>{food.description}</Text>
+                              <Text style={styles.recRowSub} numberOfLines={1}>
+                                {nutrientAmt ? `${nutrientAmt}${nutrientUnit} ${key?.replace(/_/g, ' ')}` : ''}
+                                {covers.length > 0 ? `  +${covers.slice(0,2).join(', ')}` : ''}
+                              </Text>
+                            </View>
+
+                            {/* Price + qty */}
+                            <View style={styles.recRowRight}>
+                              {food.storePriceLoading ? (
+                                <ActivityIndicator size="small" color="#28C76F" />
+                              ) : totalPrice != null ? (
+                                <Text style={styles.recRowPrice}>${totalPrice}</Text>
+                              ) : (
+                                <Text style={styles.recRowNoPrice}>—</Text>
+                              )}
+                              {isSelected && (
+                                <View style={styles.recRowQty}>
+                                  <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); updateFoodQty(food.fdcId, -1); }} style={styles.recRowQtyBtn}>
+                                    <Text style={styles.recRowQtyBtnText}>−</Text>
+                                  </TouchableOpacity>
+                                  <Text style={styles.recRowQtyVal}>{qty}</Text>
+                                  <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); updateFoodQty(food.fdcId, 1); }} style={styles.recRowQtyBtn}>
+                                    <Text style={styles.recRowQtyBtnText}>+</Text>
+                                  </TouchableOpacity>
+                                </View>
+                              )}
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                      <View style={{ height: 12 }} />
+                    </ScrollView>
                   )}
                 </View>
               );
             })()}
 
-            <ScrollView
-              style={styles.nutritionModalBody}
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={styles.nutritionModalScrollContent}
-              keyboardShouldPersistTaps="handled"
-            >
-              {/* Manual Search — lives inside the ScrollView so results scroll naturally */}
-              <View style={styles.manualSearchToggleRow}>
-                <TouchableOpacity
-                  style={[styles.manualSearchToggleBtn, showManualSearch && styles.manualSearchToggleBtnActive]}
-                  onPress={() => { setShowManualSearch(v => !v); setManualSearchResults([]); setManualSearchError(''); setManualSearchQuery(''); }}
-                >
-                  <Text style={[styles.manualSearchToggleText, showManualSearch && styles.manualSearchToggleTextActive]}>
-                    {showManualSearch ? '✕ Close Search' : '🔍 Search a specific food'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
+            {/* Manual search toggle */}
+            <View style={styles.manualSearchToggleRow}>
+              <TouchableOpacity
+                style={[styles.manualSearchToggleBtn, showManualSearch && styles.manualSearchToggleBtnActive]}
+                onPress={() => { setShowManualSearch(v => !v); setManualSearchResults([]); setManualSearchError(''); setManualSearchQuery(''); }}
+              >
+                <Text style={[styles.manualSearchToggleText, showManualSearch && styles.manualSearchToggleTextActive]}>
+                  {showManualSearch ? '✕ Close Search' : '🔍 Search a specific food'}
+                </Text>
+              </TouchableOpacity>
+            </View>
 
-              {showManualSearch && (
+            {showManualSearch && (
                 <View style={styles.manualSearchPanel}>
                   <View style={styles.manualSearchRow}>
                     <TextInput
@@ -1371,212 +1717,43 @@ const NewShoppingList = ({ navigation, route }) => {
                 </View>
               )}
 
-              <Text style={styles.smartSubtitle}>
-                Cheapest products to hit your {days}-day nutrient targets. Tap to select, then add to your list.
-              </Text>
 
-              {(() => {
-                const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
-                const merged = mergeWithDefaults(summary);
-                const targets = merged.length > 0 ? merged : DEFAULT_NUTRIENT_TARGETS;
-
-                return targets.map((item) => {
-                  const key = item.nutrient_key;
-                  const nutrientData = allNutrientProducts[key];
-                  const isLoading = !nutrientData || nutrientData.loading;
-                  const foods = nutrientData?.foods || [];
-                  const error = nutrientData?.error || '';
-
-                  return (
-                    <View key={key} style={styles.nutrientSection}>
-                      <NutrientGaugeBar
-                        nutrientKey={key}
-                        target={(item.total_target_value || 0) * (days || 1)}
-                        unit={item.unit}
-                        current={(() => {
-                          // All selected foods across ALL sections including manual search (deduplicated, quantity-scaled)
-                          const seen = new Set();
-                          let total = 0;
-                          const allPools = [
-                            ...Object.values(allNutrientProducts).flatMap(s => s.foods || []),
-                            ...manualSearchResults,
-                          ];
-                          allPools.forEach(f => {
-                            if (selectedFoodIds[f.fdcId] && !seen.has(f.fdcId)) {
-                              seen.add(f.fdcId);
-                              const qty = foodQuantities[f.fdcId] || 1;
-                              total += (f.allNutrients?.[key]?.amount || 0) * qty;
-                            }
-                          });
-                          return total;
-                        })()}
-                      />
-
-                      {isLoading ? (
-                        <ActivityIndicator size="small" color="#28C76F" style={{ marginVertical: 10 }} />
-                      ) : error ? (
-                        <Text style={styles.noDataText}>{error}</Text>
-                      ) : foods.length === 0 ? (
-                        <Text style={styles.noDataText}>No products found for this nutrient.</Text>
-                      ) : (() => {
-                        const isExpanded = !!expandedSections[key];
-                        const grouped = groupFoodsByCategory(foods);
-                        const DEFAULT_VISIBLE = 4;
-                        const visibleItems = isExpanded ? grouped : grouped.slice(0, DEFAULT_VISIBLE);
-                        const hiddenSelected = !isExpanded
-                          ? grouped.slice(DEFAULT_VISIBLE).reduce((n, item) => {
-                              if (item.type === 'food') return n + (selectedFoodIds[item.food.fdcId] ? 1 : 0);
-                              return n + item.foods.filter(f => selectedFoodIds[f.fdcId]).length;
-                            }, 0)
-                          : 0;
-
-                        const renderFoodCard = (food) => {
-                          const isSelected = !!selectedFoodIds[food.fdcId];
-                          const qty = getFoodQty(food.fdcId);
-                          const nutrientAmount = food.nutrients?.[0]?.amount;
-                          const nutrientUnit = food.nutrients?.[0]?.unit;
-                          const pricePerUnit = food.storePrice && nutrientAmount
-                            ? (food.storePrice / nutrientAmount).toFixed(3) : null;
-                          const totalPrice = food.storePrice != null && food.storePrice !== 'N/A'
-                            ? Number(food.storePrice) * qty : null;
-                          return (
-                            <View key={food.fdcId} style={[styles.smartProductCard, isSelected && styles.smartProductCardSelected]}>
-                              <TouchableOpacity
-                                style={styles.smartProductLeft}
-                                onPress={() => toggleFoodSelection(food.fdcId)}
-                                activeOpacity={0.85}
-                              >
-                                <CustomIcon origin={ICON_TYPE.IONICONS}
-                                  name={isSelected ? 'checkbox' : 'square-outline'}
-                                  size={20} color={isSelected ? '#28C76F' : '#D1D5DB'} />
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                style={styles.smartProductMid}
-                                onPress={() => toggleFoodSelection(food.fdcId)}
-                                activeOpacity={0.85}
-                              >
-                                <Text style={styles.smartProductName} numberOfLines={2}>{food.description}</Text>
-                                {nutrientAmount && (
-                                  <Text style={styles.smartProductNutrient}>
-                                    {nutrientAmount} {nutrientUnit} {key.replace(/_/g, ' ')}
-                                  </Text>
-                                )}
-                              </TouchableOpacity>
-                              <View style={styles.smartProductRight}>
-                                {food.storePriceLoading ? (
-                                  <ActivityIndicator size="small" color="#28C76F" />
-                                ) : totalPrice != null ? (
-                                  <>
-                                    <Text style={styles.smartProductPrice}>${totalPrice.toFixed(2)}</Text>
-                                    {qty > 1 && <Text style={styles.smartProductRatio}>${Number(food.storePrice).toFixed(2)} ea</Text>}
-                                    {pricePerUnit && (
-                                      <Text style={styles.smartProductRatio}>
-                                        ${pricePerUnit}/{nutrientUnit} {qty > 1 ? `(×${qty})` : ''}
-                                      </Text>
-                                    )}
-                                  </>
-                                ) : (
-                                  <Text style={styles.smartProductNoPrice}>No price</Text>
-                                )}
-                                {/* Quantity controls */}
-                                <View style={styles.qtyControls}>
-                                  <TouchableOpacity
-                                    style={styles.qtyBtn}
-                                    onPress={() => setFoodQty(food.fdcId, qty - 1)}
-                                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                                  >
-                                    <Text style={styles.qtyBtnText}>−</Text>
-                                  </TouchableOpacity>
-                                  <Text style={styles.qtyValue}>{qty}</Text>
-                                  <TouchableOpacity
-                                    style={styles.qtyBtn}
-                                    onPress={() => setFoodQty(food.fdcId, qty + 1)}
-                                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                                  >
-                                    <Text style={styles.qtyBtnText}>+</Text>
-                                  </TouchableOpacity>
-                                </View>
-                              </View>
-                            </View>
-                          );
-                        };
-
-                        return (
-                          <View>
-                            {visibleItems.map((item, idx) => {
-                              if (item.type === 'food') {
-                                return renderFoodCard(item.food);
-                              }
-                              // Grouped category row
-                              const groupKey = `${key}_${item.category}`;
-                              const isGroupExpanded = !!expandedFoodGroups[groupKey];
-                              const selectedInGroup = item.foods.filter(f => selectedFoodIds[f.fdcId]).length;
-                              return (
-                                <View key={groupKey}>
-                                  <TouchableOpacity
-                                    style={styles.foodGroupHeader}
-                                    onPress={() => setExpandedFoodGroups(prev => ({ ...prev, [groupKey]: !isGroupExpanded }))}
-                                    activeOpacity={0.8}
-                                  >
-                                    <Text style={styles.foodGroupTitle}>
-                                      {isGroupExpanded ? '▾' : '▸'} {item.foods.length} more {item.category} options
-                                      {selectedInGroup > 0 ? `  ✓ ${selectedInGroup} selected` : ''}
-                                    </Text>
-                                    <Text style={styles.foodGroupHint}>
-                                      {isGroupExpanded ? 'collapse' : 'tap to see'}
-                                    </Text>
-                                  </TouchableOpacity>
-                                  {isGroupExpanded && item.foods.map(f => renderFoodCard(f))}
-                                </View>
-                              );
-                            })}
-
-                            {/* View All / Collapse toggle */}
-                            {grouped.length > DEFAULT_VISIBLE && (
-                              <TouchableOpacity
-                                style={styles.viewAllBtn}
-                                onPress={() => setExpandedSections(prev => ({ ...prev, [key]: !isExpanded }))}
-                                activeOpacity={0.75}
-                              >
-                                <Text style={styles.viewAllBtnText}>
-                                  {isExpanded
-                                    ? '▲ Show less'
-                                    : `▼ View all ${grouped.length} items${hiddenSelected > 0 ? ` · ${hiddenSelected} selected below` : ''}`}
-                                </Text>
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        );
-                      })()}
-                    </View>
-                  );
-                });
-              })()}
-
-              <View style={styles.nutrientSubmitContainer}>
-                <TouchableOpacity
-                  style={[
-                    styles.createBtn,
-                    (!Object.values(selectedFoodIds).some(Boolean) || addingItems) && styles.disabledBtn,
-                  ]}
-                  onPress={handleAddSelectedFoods}
-                  disabled={!Object.values(selectedFoodIds).some(Boolean) || addingItems}
-                >
-                  {addingItems ? (
-                    <ActivityIndicator size="small" color="#fff" />
-                  ) : (
-                    <Text style={styles.createBtnText}>
-                      Add {Object.values(selectedFoodIds).filter(Boolean).length > 0
-                        ? Object.values(selectedFoodIds).filter(Boolean).length + ' '
-                        : ''}Item{Object.values(selectedFoodIds).filter(Boolean).length !== 1 ? 's' : ''} to List
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-              <Spacer height={40} />
-            </ScrollView>
+            {/* Footer — Add items button */}
+            <View style={styles.modalFooterRow}>
+              <TouchableOpacity
+                style={[
+                  styles.addItemsBtn,
+                  (!Object.values(selectedFoodIds).some(Boolean) || addingItems) && styles.disabledBtn,
+                ]}
+                onPress={handleAddSelectedFoods}
+                disabled={!Object.values(selectedFoodIds).some(Boolean) || addingItems}
+              >
+                {addingItems ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={styles.createBtnText}>
+                    {Object.values(selectedFoodIds).filter(Boolean).length > 0
+                      ? `Add ${Object.values(selectedFoodIds).filter(Boolean).length} Item${Object.values(selectedFoodIds).filter(Boolean).length !== 1 ? 's' : ''} to List`
+                      : 'Select items above'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </Pressable>
         </Pressable>
+
+        {/* Loading overlay — shown while Walmart prices are being fetched */}
+        {isAutoGenerating && (
+          <Pressable style={styles.autoGenOverlay} onPress={() => {}}>
+            <View style={styles.autoGenOverlayCard}>
+              <ActivityIndicator size="large" color="#28C76F" style={{ marginBottom: 16 }} />
+              <Text style={styles.autoGenOverlayTitle}>Finding Best Recommendations</Text>
+              <Text style={styles.autoGenOverlaySubtitle}>
+                Scanning Walmart prices to find the cheapest options for each nutrient...
+              </Text>
+            </View>
+          </Pressable>
+        )}
       </Modal>
     </WrapperContainer>
   );
@@ -1612,25 +1789,17 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     marginBottom: moderateScaleVertical(12),
   },
-  budgetInputWrapper: {
-    justifyContent: 'center',
-    position: 'relative',
-    marginTop: moderateScaleVertical(10),
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: moderateScaleVertical(10),
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
   },
-  currencySymbol: {
-    fontSize: textScale(16),
-    color: '#6B7280',
-    marginRight: 4,
-  },
-  budgetSuffix: {
-    position: 'absolute',
-    right: moderateScale(16),
-
-    bottom: moderateScaleVertical(30),
-    fontSize: textScale(14),
-    color: '#9CA3AF',
-    fontWeight: '500',
-  },
+  toggleInfo: { flex: 1, marginRight: moderateScale(12) },
+  toggleLabel: { fontSize: textScale(15), fontWeight: '600', color: '#1F2937' },
+  toggleSub: { fontSize: textScale(12), color: '#9CA3AF', marginTop: 2 },
   stepperContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1748,11 +1917,148 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   nutritionModalContent: {
-    width: '100%',
-    height: '80%',
+    width: '82%',
+    maxWidth: 420,
+    height: '85%',
     backgroundColor: '#FFF',
     borderRadius: 16,
     overflow: 'hidden',
+    alignSelf: 'center',
+  },
+  alsoCoversRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 3 },
+  alsoCoversLabel: { fontSize: 10, color: '#9CA3AF', fontStyle: 'italic' },
+  alsoCoversValue: { fontSize: 10, color: '#28C76F', fontWeight: '600' },
+  modalFooterRow: {
+    padding: moderateScale(14),
+    borderTopWidth: 1, borderTopColor: '#E5E7EB',
+    backgroundColor: '#fff',
+  },
+  addItemsBtn: {
+    backgroundColor: '#28C76F', borderRadius: 12,
+    paddingVertical: moderateScaleVertical(14),
+    alignItems: 'center', justifyContent: 'center',
+  },
+  singleNutrientView: {
+    flex: 1, paddingHorizontal: moderateScale(10), paddingTop: moderateScaleVertical(6),
+    overflow: 'hidden',
+  },
+  singleNutrientGaugeBox: {
+    backgroundColor: '#F9FAFB', borderRadius: 10,
+    padding: moderateScale(10), marginBottom: moderateScaleVertical(6),
+  },
+  nutrientNavRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: moderateScaleVertical(6),
+  },
+  nutrientNavBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 6, paddingHorizontal: 10,
+    backgroundColor: '#F3F4F6', borderRadius: 8,
+  },
+  nutrientNavText: { fontSize: textScale(13), color: '#374151', fontWeight: '600' },
+  nutrientNavName: {
+    fontSize: textScale(15), fontWeight: '800', color: '#111827',
+    textTransform: 'uppercase', letterSpacing: 0.5, flex: 1, textAlign: 'center',
+  },
+  nutrientCounter: {
+    fontSize: textScale(13), color: '#6B7280', fontWeight: '600', minWidth: 40, textAlign: 'right',
+  },
+  nutrientLoadingBox: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 32,
+  },
+  nutrientLoadingText: { marginTop: 10, color: '#6B7280', fontSize: textScale(13) },
+  recListScroll: {
+    flex: 1,
+  },
+  recRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: moderateScaleVertical(7), paddingHorizontal: moderateScale(6),
+    borderBottomWidth: 1, borderBottomColor: '#F3F4F6',
+    backgroundColor: '#fff',
+  },
+  recRowSelected: {
+    backgroundColor: '#F0FDF4',
+  },
+  recRank: {
+    fontSize: textScale(10), color: '#9CA3AF', fontWeight: '700',
+    width: 18, textAlign: 'center', marginRight: 4,
+  },
+  recRowMid: { flex: 1, marginRight: 6 },
+  recRowName: { fontSize: textScale(12), fontWeight: '600', color: '#111827', lineHeight: 16 },
+  recRowSub: { fontSize: textScale(10), color: '#6B7280', marginTop: 1 },
+  recRowRight: { alignItems: 'flex-end', minWidth: 52 },
+  recRowPrice: { fontSize: textScale(13), fontWeight: '800', color: '#111827' },
+  recRowNoPrice: { fontSize: textScale(12), color: '#9CA3AF' },
+  recRowQty: {
+    flexDirection: 'row', alignItems: 'center', marginTop: 4,
+    borderRadius: 6, overflow: 'hidden', borderWidth: 1, borderColor: '#D1D5DB',
+  },
+  recRowQtyBtn: {
+    paddingHorizontal: 6, paddingVertical: 2,
+    backgroundColor: '#F3F4F6',
+  },
+  recRowQtyBtnText: { fontSize: textScale(13), fontWeight: '700', color: '#374151' },
+  recRowQtyVal: {
+    paddingHorizontal: 6,
+    fontSize: textScale(12), fontWeight: '700', color: '#111827',
+  },
+  modalBudgetCart: {
+    fontSize: textScale(12), fontWeight: '700', color: '#28C76F',
+  },
+  autoGenOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center', alignItems: 'center',
+    zIndex: 9999,
+    borderRadius: moderateScale(20),
+  },
+  autoGenOverlayCard: {
+    backgroundColor: '#fff',
+    borderRadius: moderateScale(16),
+    padding: moderateScale(28),
+    marginHorizontal: moderateScale(32),
+    alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 12,
+    elevation: 10,
+  },
+  autoGenOverlayTitle: {
+    fontSize: textScale(17), fontWeight: '700', color: '#111827',
+    textAlign: 'center', marginBottom: 8,
+  },
+  autoGenOverlaySubtitle: {
+    fontSize: textScale(13), color: '#6B7280', textAlign: 'center', lineHeight: 20,
+  },
+  modalBudgetRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: moderateScale(16), paddingVertical: moderateScaleVertical(10),
+    backgroundColor: '#F9FAFB', borderBottomWidth: 1, borderBottomColor: '#E5E7EB',
+  },
+  modalBudgetLabel: { fontSize: textScale(14), fontWeight: '700', color: '#111827', marginRight: 10 },
+  modalBudgetInputWrap: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#fff', borderWidth: 1, borderColor: '#D1D5DB',
+    borderRadius: 8, paddingHorizontal: 10, height: 36,
+  },
+  modalBudgetCurrency: { fontSize: textScale(15), color: '#374151', marginRight: 2 },
+  modalBudgetInput: {
+    fontSize: textScale(15), color: '#111827', minWidth: 70, maxWidth: 100,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}),
+  },
+  modalBudgetHint: { fontSize: textScale(12), color: '#9CA3AF', marginLeft: 10, flex: 1 },
+  autoGenBanner: {
+    backgroundColor: '#ECFDF5',
+    borderLeftWidth: 3,
+    borderLeftColor: '#28C76F',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    marginHorizontal: 16,
+    marginBottom: 4,
+    borderRadius: 6,
+  },
+  autoGenBannerText: {
+    fontSize: textScale(12),
+    color: '#166534',
+    lineHeight: 18,
   },
   nutritionModalHeader: {
     flexDirection: 'row',
