@@ -104,6 +104,13 @@ workflows:
           keychain add-certificates
           rm /tmp/cert_key.pem
 
+      - name: Bump build number
+        script: |
+          # Set build number to Codemagic's auto-incrementing counter
+          cd ios
+          agvtool new-version -all $BUILD_NUMBER
+          echo "Build number set to $BUILD_NUMBER"
+
       - name: Build IPA for TestFlight
         script: |
           set -e
