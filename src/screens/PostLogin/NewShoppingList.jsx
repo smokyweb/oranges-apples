@@ -449,13 +449,13 @@ const NewShoppingList = ({ navigation, route }) => {
     });
     setAllNutrientProducts(initial);
 
-    const sortFoods = (foods) => [...foods].sort((a, b) => {
-      const aNutr = a.nutrients?.[0]?.amount || 0;
-      const bNutr = b.nutrients?.[0]?.amount || 0;
-      const aRatio = (a.storePrice && aNutr) ? a.storePrice / aNutr : Infinity;
-      const bRatio = (b.storePrice && bNutr) ? b.storePrice / bNutr : Infinity;
-      return aRatio - bRatio;
-    });
+    const safePrice = (v) => {
+      if (v == null || v === 'N/A') return Infinity;
+      const n = parseFloat(v);
+      return isNaN(n) || n <= 0 ? Infinity : n;
+    };
+
+    const sortFoods = (foods) => [...foods].sort((a, b) => safePrice(a.storePrice) - safePrice(b.storePrice));
 
     // Apply a partial price map to state immediately (called per chunk as it resolves)
     const applyPartialPrices = (chunkPriceMap, isFinal) => {
@@ -1450,14 +1450,16 @@ const NewShoppingList = ({ navigation, route }) => {
               const nutrientData = allNutrientProducts[key];
               const isLoadingNutrient = !nutrientData || nutrientData.loading;
 
-              // Top 20 cheapest priced foods for this nutrient
+              // Top 20 — sorted cheapest first (priced items), unpriced at bottom
               const allFoods = nutrientData?.foods || [];
-              const pricedFoods = allFoods
-                .filter(f => f.storePrice != null && f.storePrice !== 'N/A' && parseFloat(f.storePrice) > 0)
-                .sort((a, b) => parseFloat(a.storePrice) - parseFloat(b.storePrice))
+              const safeP = (v) => {
+                if (v == null || v === 'N/A') return Infinity;
+                const n = parseFloat(v);
+                return isNaN(n) || n <= 0 ? Infinity : n;
+              };
+              const displayFoods = [...allFoods]
+                .sort((a, b) => safeP(a.storePrice) - safeP(b.storePrice))
                 .slice(0, 20);
-              // If prices not yet loaded, show top 20 by nutrient content
-              const displayFoods = pricedFoods.length > 0 ? pricedFoods : allFoods.slice(0, 20);
 
               // Current value for this nutrient from selected foods
               const currentNutrient = (() => {

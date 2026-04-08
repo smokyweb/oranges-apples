@@ -1,9 +1,9 @@
 // Nutrients tracked across the app (Smart Suggestions modal, Home screen, Profile)
-export const TRACKED_NUTRIENT_KEYS = new Set([
+export const TRACKED_NUTRIENT_KEYS = [
   'CALCIUM', 'CARBS', 'PROTEIN', 'VIT A', 'VIT C', 'VIT D', 'VIT E', 'VIT K',
   'VIT B6', 'FOLATE', 'VIT B12', 'IRON', 'MAGNEISUM', 'ZINC', 'POTASIUM',
   'SODIUM', 'FIBER', 'FAT',
-]);
+];
 
 // RDA fallback targets — used when a nutrient isn't in the user's DB profile
 export const DEFAULT_NUTRIENT_TARGETS = [
@@ -28,7 +28,7 @@ export const DEFAULT_NUTRIENT_TARGETS = [
 ];
 
 export const filterTrackedNutrients = (summary) =>
-  (summary || []).filter(item => TRACKED_NUTRIENT_KEYS.has(item.nutrient_key));
+  (summary || []).filter(item => TRACKED_NUTRIENT_KEYS.includes(item.nutrient_key));
 
 // Merge profile targets with defaults — ensures all 18 tracked nutrients always appear
 export const mergeWithDefaults = (summary) => {

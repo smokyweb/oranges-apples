@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, ActivityIndicator, Alert } from 'react-native';
 import { useFormik } from 'formik';
 import * as Yup from 'yup';
@@ -26,6 +26,9 @@ const SignUp = ({ navigation }) => {
   const isLoading = sendVerificationCodeLoadingStatus === LoadingStatus.LOADING;
 
 
+  const [selectedGender, setSelectedGender] = useState('');
+  const [genderError, setGenderError] = useState('');
+
   const signupSchema = Yup.object().shape({
     fullName: Yup.string().required('Full name is required'),
     email: Yup.string().email('Invalid email').required('Email is required'),
@@ -35,6 +38,10 @@ const SignUp = ({ navigation }) => {
     confirmPassword: Yup.string()
       .oneOf([Yup.ref('password'), null], 'Passwords must match')
       .required('Confirm password is required'),
+    age: Yup.number()
+      .min(1, 'Enter a valid age')
+      .max(120, 'Enter a valid age')
+      .required('Age is required'),
   });
 
 
@@ -44,14 +51,21 @@ const SignUp = ({ navigation }) => {
       email: '',
       password: '',
       confirmPassword: '',
+      age: '',
     },
     validationSchema: signupSchema,
     onSubmit: async (values) => {
+      if (!selectedGender) {
+        setGenderError('Please select your gender');
+        return;
+      }
+      setGenderError('');
       try {
         const normalizedValues = {
           ...values,
           password: values.password.toLowerCase(),
           confirmPassword: values.confirmPassword.toLowerCase(),
+          gender: selectedGender,
         };
         await dispatch(sendVerificationCodeAction({ email: values.email })).unwrap();
         NavigationService.navigate(RouteName.VERIFY_EMAIL, {
@@ -140,9 +154,33 @@ const SignUp = ({ navigation }) => {
 
         />
 
-        {/* {sendVerificationCodeError && (
-          <Text style={styles.errorText}>{sendVerificationCodeError?.message || sendVerificationCodeError}</Text>
-        )} */}
+        <CustomInput
+          label="Age"
+          placeholder="Enter your age"
+          keyboardType="numeric"
+          value={formik.values.age}
+          onChangeText={formik.handleChange('age')}
+          onBlur={formik.handleBlur('age')}
+          error={formik.touched.age && formik.errors.age}
+          errorText={formik.errors.age}
+        />
+
+        {/* Gender selector */}
+        <View style={styles.genderSection}>
+          <Text style={styles.genderLabel}>Gender</Text>
+          <View style={styles.genderRow}>
+            {['Male', 'Female', 'Other'].map(g => (
+              <TouchableOpacity
+                key={g}
+                style={[styles.genderBtn, selectedGender === g && styles.genderBtnActive]}
+                onPress={() => { setSelectedGender(g); setGenderError(''); }}
+              >
+                <Text style={[styles.genderBtnText, selectedGender === g && styles.genderBtnTextActive]}>{g}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {genderError ? <Text style={styles.errorText}>{genderError}</Text> : null}
+        </View>
 
         {/* Continue Button */}
         <TouchableOpacity
@@ -254,5 +292,40 @@ const styles = StyleSheet.create({
     fontSize: textScale(14),
     color: '#28C76F',
     fontWeight: 'bold',
+  },
+  genderSection: {
+    marginBottom: moderateScaleVertical(12),
+  },
+  genderLabel: {
+    fontSize: textScale(14),
+    fontWeight: '600',
+    color: colors.black || '#1A1A1A',
+    marginBottom: moderateScaleVertical(8),
+  },
+  genderRow: {
+    flexDirection: 'row',
+    gap: moderateScale(10),
+  },
+  genderBtn: {
+    flex: 1,
+    paddingVertical: moderateScaleVertical(12),
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#D1D5DB',
+    alignItems: 'center',
+    backgroundColor: '#F9FAFB',
+  },
+  genderBtnActive: {
+    borderColor: '#28C76F',
+    backgroundColor: '#ECFDF5',
+  },
+  genderBtnText: {
+    fontSize: textScale(14),
+    color: '#6B7280',
+    fontWeight: '500',
+  },
+  genderBtnTextActive: {
+    color: '#16A34A',
+    fontWeight: '700',
   },
 });

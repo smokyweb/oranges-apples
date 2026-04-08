@@ -62,7 +62,24 @@ const VerifyEmail = ({ navigation, route }) => {
             email: formData.email,
             password: formData.password,
           })).unwrap();
-          
+
+          // Save age + gender if collected during signup
+          if (formData.age || formData.gender) {
+            try {
+              await axiosRequest({
+                method: 'POST',
+                url: 'update-profile',
+                data: {
+                  name: formData.fullName,
+                  age: formData.age ? String(formData.age) : undefined,
+                  gender: formData.gender || undefined,
+                },
+              });
+            } catch (profileErr) {
+              console.log('Profile save error (non-fatal):', profileErr);
+            }
+          }
+
           console.log('Account created and logged in successfully');
           NavigationService.navigate(RouteName.SETUP_HOUSEHOLD);
         }
