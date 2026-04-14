@@ -71,7 +71,7 @@ const AboutUs = () => {
       }  
     </style>
    
-    ${pageContent?.content}  
+    ${pageContent?.data?.content || pageContent?.content || ''}  
   
   `;
   
@@ -82,7 +82,7 @@ const AboutUs = () => {
         <View style={styles.loaderContainer}>
           <ActivityIndicator size="large" color="#28C76F" />
         </View>
-      ) : pageContent ? (
+      ) : (pageContent?.data?.content || pageContent?.content) ? (
         <WebView
           source={{ html:htmlContent }}
           style={styles.webview}

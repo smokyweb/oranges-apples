@@ -162,25 +162,50 @@ const Home = () => {
           </View>
         </View>
 
-        <LinearGradient
-          colors={['#FFF7ED', '#FFF7ED']}
-          style={styles.gasTankSection}
-        >
-          <View style={styles.gasTankHeader}>
-            <Text style={styles.sectionTitleCenter}>
-              {selectedNutrient ? `${formatNutrientKey(selectedNutrient.nutrient_key)}` : 'Nutrition Progress'}
-            </Text>
+        {/* Nutritional Targets — at top */}
+        {familyNutrition?.summary?.length > 0 && (
+          <View style={[styles.nutritionSection, { paddingHorizontal: moderateScale(16) }]}>
+            <Text style={styles.sectionTitle}>Nutritional Targets</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.nutritionHorizontalScroll}
+            >
+              {mergeWithDefaults(familyNutrition.summary).reduce((acc, curr, i) => {
+                if (i % 2 === 0) acc.push([curr]);
+                else acc[acc.length - 1].push(curr);
+                return acc;
+              }, []).map((chunk, colIndex) => (
+                <View key={colIndex} style={styles.nutritionColumn}>
+                  {chunk.map((item, index) => {
+                    const isSelected = selectedNutrient?.nutrient_key === item.nutrient_key;
+                    return (
+                      <TouchableOpacity
+                        key={index}
+                        onPress={() => setSelectedNutrient(isSelected ? null : item)}
+                        style={[styles.nutritionItem, isSelected && styles.nutritionItemActive]}
+                      >
+                        <View style={[styles.nutritionIconContainer, { backgroundColor: getNutrientColor(item.nutrient_key) }]}>
+                          <CustomIcon
+                            origin={ICON_TYPE.FONT_AWESOME5}
+                            name={getNutrientIcon(item.nutrient_key)}
+                            size={14}
+                            color={colors.white}
+                          />
+                        </View>
+                        <View style={styles.nutritionTextContainer}>
+                          <Text style={styles.nutritionValue}>{item.total_target_value}</Text>
+                          <Text style={styles.nutritionUnit}>{item.unit}</Text>
+                        </View>
+                        <Text style={styles.nutritionKey} numberOfLines={1}>{formatNutrientKey(item.nutrient_key)}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ))}
+            </ScrollView>
           </View>
-
-          <NutritionalGauge value={nutritionScore} />
-
-          <Text style={styles.gasTankSub}>
-            {selectedNutrient
-              ? `${nutritionScore}% of your ${formatNutrientKey(selectedNutrient.nutrient_key)} target met`
-              : "Select a nutrient to track progress"
-            }
-          </Text>
-        </LinearGradient>
+        )}
 
         {/* Budget Status Card */}
         <View style={styles.contentPadding}>
@@ -299,50 +324,7 @@ const Home = () => {
 
 
 
-          {/* Family Nutrition Section */}
-          {familyNutrition?.summary?.length > 0 && (
-            <View style={styles.nutritionSection}>
-              <Text style={styles.sectionTitle}>Family Nutrition Targets</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.nutritionHorizontalScroll}
-              >
-                {mergeWithDefaults(familyNutrition.summary).reduce((acc, curr, i) => {
-                  if (i % 2 === 0) acc.push([curr]);
-                  else acc[acc.length - 1].push(curr);
-                  return acc;
-                }, []).map((chunk, colIndex) => (
-                  <View key={colIndex} style={styles.nutritionColumn}>
-                    {chunk.map((item, index) => {
-                      const isSelected = selectedNutrient?.nutrient_key === item.nutrient_key;
-                      return (
-                        <TouchableOpacity
-                          key={index}
-                          onPress={() => setSelectedNutrient(isSelected ? null : item)}
-                          style={[styles.nutritionItem, isSelected && styles.nutritionItemActive]}
-                        >
-                          <View style={[styles.nutritionIconContainer, { backgroundColor: getNutrientColor(item.nutrient_key) }]}>
-                            <CustomIcon
-                              origin={ICON_TYPE.FONT_AWESOME5}
-                              name={getNutrientIcon(item.nutrient_key)}
-                              size={14}
-                              color={colors.white}
-                            />
-                          </View>
-                          <View style={styles.nutritionTextContainer}>
-                            <Text style={styles.nutritionValue}>{item.total_target_value}</Text>
-                            <Text style={styles.nutritionUnit}>{item.unit}</Text>
-                          </View>
-                          <Text style={styles.nutritionKey} numberOfLines={1}>{formatNutrientKey(item.nutrient_key)}</Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                ))}
-              </ScrollView>
-            </View>
-          )}
+          {/* Family Nutrition Targets moved to top of screen */}
 
           {/* My Saved Lists Section */}
           <View style={styles.listHeader}>

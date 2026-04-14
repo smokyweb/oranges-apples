@@ -156,6 +156,7 @@ const NewShoppingList = ({ navigation, route }) => {
   const [selectedAllergies, setSelectedAllergies] = useState([]);
   const [showFoodPrefDropdown, setShowFoodPrefDropdown] = useState(false);
   const [showAllergyDropdown, setShowAllergyDropdown] = useState(false);
+  const [showFilterPanel, setShowFilterPanel] = useState(false);
 
   const FOOD_PREFERENCES = ['None', 'Omnivore', 'Vegetarian', 'Vegan', 'Pescatarian', 'Keto', 'Paleo'];
   const ALLERGY_OPTIONS = ['Gluten', 'Dairy', 'Nuts', 'Shellfish', 'Eggs', 'Soy'];
@@ -1159,7 +1160,7 @@ const NewShoppingList = ({ navigation, route }) => {
   const updateDays = (type) => {
     const numericDays = Number(days);
     if (type === 'minus' && numericDays > 1) setDays(numericDays - 1);
-    if (type === 'plus' && numericDays < 14) setDays(numericDays + 1);
+    if (type === 'plus' && numericDays < 7) setDays(numericDays + 1);
   };
 
   const showAlert = (message) => {
@@ -1409,34 +1410,32 @@ const NewShoppingList = ({ navigation, route }) => {
               );
             })()}
 
-            {/* Budget row */}
-            <View style={styles.modalBudgetRow}>
-              <Text style={styles.modalBudgetLabel}>💰 Budget</Text>
-              <View style={styles.modalBudgetInputWrap}>
-                <Text style={styles.modalBudgetCurrency}>$</Text>
-                <TextInput
-                  style={styles.modalBudgetInput}
-                  keyboardType="numeric"
-                  value={budget}
-                  onChangeText={text => setBudget(text.replace(/[^0-9.]/g, ''))}
-                  onFocus={() => { if (budget === '0' || budget === '100') setBudget(''); }}
-                  onBlur={() => { if (!budget || budget === '') setBudget('100'); }}
-                  placeholder="100"
-                  placeholderTextColor="#9CA3AF"
-                />
+            {/* Cart total + Days row */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: moderateScale(12), paddingVertical: moderateScaleVertical(8), gap: 12 }}>
+              {/* Cart total */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                <Text style={styles.modalBudgetLabel}>🛒 Cart</Text>
+                <Text style={[styles.modalBudgetCart, { color: '#28C76F', fontWeight: '700', marginLeft: 6 }]}>
+                  ${cartTotal.toFixed(2)}
+                </Text>
               </View>
-              <Text style={styles.modalBudgetHint}>for {days || 7} days</Text>
-              <View style={{ flex: 1 }} />
-              {/* Cart total inline */}
-              {(() => {
-                const budgetNum = parseFloat(budget) || 0;
-                const over = budgetNum > 0 && cartTotal > budgetNum;
-                return (
-                  <Text style={[styles.modalBudgetCart, over && { color: '#EF4444' }]}>
-                    Cart: ${cartTotal.toFixed(2)}{budgetNum > 0 ? ` / $${budgetNum.toFixed(2)}` : ''}
-                  </Text>
-                );
-              })()}
+              {/* Days selector */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={styles.modalBudgetLabel}>Days:</Text>
+                <TouchableOpacity
+                  style={styles.daysBtnSmall}
+                  onPress={() => updateDays('minus')}
+                >
+                  <Text style={styles.daysBtnSmallText}>-</Text>
+                </TouchableOpacity>
+                <Text style={styles.daysValueSmall}>{days}</Text>
+                <TouchableOpacity
+                  style={styles.daysBtnSmall}
+                  onPress={() => updateDays('plus')}
+                >
+                  <Text style={styles.daysBtnSmallText}>+</Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             {/* Single-nutrient view — no scroll */}
@@ -1457,7 +1456,32 @@ const NewShoppingList = ({ navigation, route }) => {
                 const n = parseFloat(v);
                 return isNaN(n) || n <= 0 ? Infinity : n;
               };
-              const displayFoods = [...allFoods]
+              // Apply preference + allergy filters by food description keywords
+              const DIET_EXCLUDE = {
+                Vegetarian: ['chicken','beef','pork','turkey','salmon','tuna','shrimp','bacon','ham','lamb','veal','venison','bison','duck','goose','anchovy','sardine','herring','crab','lobster','clam','oyster','mussel','scallop','tilapia','cod','halibut','trout','catfish'],
+                Vegan: ['chicken','beef','pork','turkey','salmon','tuna','shrimp','bacon','ham','lamb','veal','venison','bison','duck','goose','anchovy','sardine','herring','crab','lobster','clam','oyster','mussel','scallop','tilapia','cod','halibut','trout','catfish','milk','cheese','yogurt','butter','cream','whey','egg','gelatin','honey'],
+                Pescatarian: ['chicken','beef','pork','turkey','bacon','ham','lamb','veal','venison','bison','duck','goose'],
+                Paleo: ['milk','cheese','yogurt','butter','cream','whey','bread','pasta','wheat','oat','rice','bean','lentil','peanut','corn','soy','tofu'],
+              };
+              const ALLERGY_EXCLUDE = {
+                Gluten: ['wheat','bread','pasta','flour','barley','rye','oat','cracker','cereal','pretzel','bagel','muffin','biscuit'],
+                Dairy: ['milk','cheese','yogurt','butter','cream','whey','casein','lactose','ghee'],
+                Nuts: ['almond','cashew','walnut','pecan','hazelnut','pistachio','macadamia','brazil nut','pine nut','chestnut'],
+                Shellfish: ['shrimp','crab','lobster','clam','oyster','mussel','scallop','prawn','crawfish'],
+                Eggs: ['egg'],
+                Soy: ['soy','tofu','edamame','tempeh','miso'],
+              };
+              const applyFoodFilters = (foods) => {
+                const dietExclude = DIET_EXCLUDE[foodPreference] || [];
+                const allergyExclude = selectedAllergies.flatMap(a => ALLERGY_EXCLUDE[a] || []);
+                const allExclude = [...dietExclude, ...allergyExclude];
+                if (!allExclude.length) return foods;
+                return foods.filter(food => {
+                  const desc = (food.description || '').toLowerCase();
+                  return !allExclude.some(kw => desc.includes(kw));
+                });
+              };
+              const displayFoods = applyFoodFilters([...allFoods])
                 .sort((a, b) => safeP(a.storePrice) - safeP(b.storePrice))
                 .slice(0, 20);
 
@@ -1608,17 +1632,56 @@ const NewShoppingList = ({ navigation, route }) => {
               );
             })()}
 
-            {/* Manual search toggle */}
+            {/* Manual search toggle + filter button row */}
             <View style={styles.manualSearchToggleRow}>
+              {/* Filter by food preferences */}
               <TouchableOpacity
-                style={[styles.manualSearchToggleBtn, showManualSearch && styles.manualSearchToggleBtnActive]}
-                onPress={() => { setShowManualSearch(v => !v); setManualSearchResults([]); setManualSearchError(''); setManualSearchQuery(''); }}
+                style={[styles.manualSearchToggleBtn, showFilterPanel && styles.manualSearchToggleBtnActive, { flex: 1 }]}
+                onPress={() => { setShowFilterPanel(v => !v); setShowManualSearch(false); }}
+              >
+                <Text style={[styles.manualSearchToggleText, showFilterPanel && styles.manualSearchToggleTextActive]}>
+                  {showFilterPanel ? 'Close Filters' : 'Preferences'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.manualSearchToggleBtn, showManualSearch && styles.manualSearchToggleBtnActive, { flex: 1 }]}
+                onPress={() => { setShowManualSearch(v => !v); setShowFilterPanel(false); setManualSearchResults([]); setManualSearchError(''); setManualSearchQuery(''); }}
               >
                 <Text style={[styles.manualSearchToggleText, showManualSearch && styles.manualSearchToggleTextActive]}>
-                  {showManualSearch ? '✕ Close Search' : '🔍 Search a specific food'}
+                  {showManualSearch ? 'Close Search' : 'Search Food'}
                 </Text>
               </TouchableOpacity>
             </View>
+
+            {/* Filter panel */}
+            {showFilterPanel && (
+              <View style={styles.filterPanel}>
+                <Text style={styles.filterPanelTitle}>Diet</Text>
+                <View style={styles.filterChipRow}>
+                  {FOOD_PREFERENCES.filter(p => p !== 'None').map(pref => (
+                    <TouchableOpacity
+                      key={pref}
+                      style={[styles.filterChip, foodPreference === pref && styles.filterChipActive]}
+                      onPress={() => setFoodPreference(foodPreference === pref ? '' : pref)}
+                    >
+                      <Text style={[styles.filterChipText, foodPreference === pref && styles.filterChipTextActive]}>{pref}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <Text style={[styles.filterPanelTitle, { marginTop: 10 }]}>Avoid</Text>
+                <View style={styles.filterChipRow}>
+                  {ALLERGY_OPTIONS.map(allergy => (
+                    <TouchableOpacity
+                      key={allergy}
+                      style={[styles.filterChip, selectedAllergies.includes(allergy) && styles.filterChipActive]}
+                      onPress={() => toggleAllergy(allergy)}
+                    >
+                      <Text style={[styles.filterChipText, selectedAllergies.includes(allergy) && styles.filterChipTextActive]}>{allergy}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
 
             {showManualSearch && (
                 <View style={styles.manualSearchPanel}>
@@ -2007,6 +2070,18 @@ const styles = StyleSheet.create({
   modalBudgetCart: {
     fontSize: textScale(12), fontWeight: '700', color: '#28C76F',
   },
+  daysBtnSmall: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: '#E5E7EB',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  daysBtnSmallText: {
+    fontSize: textScale(16), fontWeight: '700', color: '#374151', lineHeight: 20,
+  },
+  daysValueSmall: {
+    fontSize: textScale(15), fontWeight: '700', color: '#111827',
+    minWidth: 22, textAlign: 'center',
+  },
   autoGenOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.65)',
@@ -2205,6 +2280,51 @@ const styles = StyleSheet.create({
   manualSearchToggleRow: {
     paddingHorizontal: moderateScale(4),
     paddingVertical: moderateScaleVertical(6),
+    flexDirection: 'row',
+    gap: 8,
+  },
+  filterPanel: {
+    marginHorizontal: moderateScale(4),
+    marginBottom: moderateScaleVertical(8),
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    padding: moderateScale(12),
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  filterPanelTitle: {
+    fontSize: textScale(11),
+    fontWeight: '700',
+    color: '#6B7280',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+  filterChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  filterChip: {
+    paddingVertical: moderateScaleVertical(5),
+    paddingHorizontal: moderateScale(10),
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#D1D5DB',
+    backgroundColor: '#fff',
+  },
+  filterChipActive: {
+    borderColor: '#28C76F',
+    backgroundColor: '#ECFDF5',
+  },
+  filterChipText: {
+    fontSize: textScale(12),
+    color: '#6B7280',
+    fontWeight: '500',
+  },
+  filterChipTextActive: {
+    color: '#16A34A',
+    fontWeight: '700',
   },
   manualSearchToggleBtn: {
     paddingVertical: moderateScaleVertical(8),
@@ -2222,6 +2342,7 @@ const styles = StyleSheet.create({
     fontSize: textScale(13),
     fontWeight: '600',
     color: '#374151',
+    textAlign: 'center',
   },
   manualSearchToggleTextActive: {
     color: '#EF4444',

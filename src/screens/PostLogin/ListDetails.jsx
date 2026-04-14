@@ -334,14 +334,11 @@ const ListDetails = ({ route }) => {
               </View>
             </View>
 
-            {/* Progress Bars */}
+            {/* Running spend total */}
             <View style={styles.progressSection}>
               <View style={styles.progressTextRow}>
-                <Text style={styles.progressLabel}>Budget Used</Text>
-                <Text style={styles.progressValue}>${totalSpent.toFixed(2)} / ${currentListData?.budget || 0}</Text>
-              </View>
-              <View style={styles.progressBarBg}>
-                <View style={[styles.progressBarFill, { width: `${(totalSpent / (currentListData?.budget || 1)) * 100}%`, backgroundColor: '#28C76F' }]} />
+                <Text style={styles.progressLabel}>Total Spend</Text>
+                <Text style={[styles.progressValue, { color: '#28C76F', fontWeight: '700' }]}>${totalSpent.toFixed(2)}</Text>
               </View>
 
               {/* <View style={styles.progressTextRow}>
