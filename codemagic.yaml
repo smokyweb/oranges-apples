@@ -97,8 +97,8 @@ workflows:
             --json 2>/dev/null || echo "[]")
           CERT_IDS=$(echo "$CERTS_JSON" | jq -r '.[].id' 2>/dev/null || true)
           for cert_id in $CERT_IDS; do
-            echo "Revoking cert: $cert_id"
-            app-store-connect certificates revoke "$cert_id" \
+            echo "Deleting cert: $cert_id"
+            app-store-connect certificates delete "$cert_id" \
               --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
               --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
               --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
