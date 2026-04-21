@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -213,6 +213,39 @@ const NewShoppingList = ({ navigation, route }) => {
   const [autoSavingFdcId, setAutoSavingFdcId] = useState(null); // tracks which item is mid-save
   // getUserLocation — reads cached {lat,lng} set by locationService at app startup
   const getUserLocation = React.useCallback(() => getCachedLocation(), []);
+
+  // Auto-select top N cheapest foods per nutrient after prices load (N = days)
+  // Reset when days changes so re-selection happens with new count
+  const autoSelectDoneRef = useRef(false);
+  useEffect(() => { autoSelectDoneRef.current = false; }, [days]);
+  useEffect(() => {
+    if (!isAutoGenerating && Object.keys(allNutrientProducts).length > 0 && !autoSelectDoneRef.current) {
+      const hasSelections = Object.keys(selectedFoodIds).length > 0;
+      if (hasSelections) { autoSelectDoneRef.current = true; return; }
+      const autoSelected = {};
+      const safeP = (v) => {
+        if (v == null || v === 'N/A') return Infinity;
+        const n = parseFloat(v);
+        return isNaN(n) || n <= 0 ? Infinity : n;
+      };
+      Object.values(allNutrientProducts).forEach(nutrientData => {
+        if (!nutrientData?.foods?.length) return;
+        const priced = [...nutrientData.foods]
+          .filter(f => f.storePrice != null && f.storePrice !== 'N/A' && parseFloat(f.storePrice) > 0)
+          .sort((a, b) => safeP(a.storePrice) - safeP(b.storePrice));
+        const picks = priced.slice(0, days);
+        picks.forEach(food => {
+          if (food.fdcId && !autoSelected[food.fdcId]) {
+            autoSelected[food.fdcId] = true;
+          }
+        });
+      });
+      if (Object.keys(autoSelected).length > 0) {
+        setSelectedFoodIds(autoSelected);
+        autoSelectDoneRef.current = true;
+      }
+    }
+  }, [isAutoGenerating, allNutrientProducts]);
 
   const runManualSearch = async () => {
     const q = manualSearchQuery.trim();
@@ -1252,7 +1285,19 @@ const NewShoppingList = ({ navigation, route }) => {
             value={listName}
             onChangeText={setListName}
           />
-
+          {/* Days selector */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 12 }}>
+            <Text style={[styles.sectionLabel, { marginBottom: 0, flex: 1 }]}>Shopping Days</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <TouchableOpacity style={styles.daysBtnSmall} onPress={() => updateDays('minus')}>
+                <Text style={styles.daysBtnSmallText}>-</Text>
+              </TouchableOpacity>
+              <Text style={styles.daysValueSmall}>{days}</Text>
+              <TouchableOpacity style={styles.daysBtnSmall} onPress={() => updateDays('plus')}>
+                <Text style={styles.daysBtnSmallText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
 
 
