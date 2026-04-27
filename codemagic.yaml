@@ -88,20 +88,35 @@ workflows:
           set -e
           keychain initialize
 
-          # Revoke existing IOS_DISTRIBUTION certs (Apple limits to 1 at a time)
+          # Delete existing IOS_DISTRIBUTION certs so we can create a fresh one
           CERTS_JSON=$(app-store-connect certificates list \
             --type IOS_DISTRIBUTION \
             --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
             --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
             --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
             --json 2>/dev/null || echo "[]")
-          CERT_IDS=$(echo "$CERTS_JSON" | jq -r '.[].id' 2>/dev/null || true)
+          echo "Certs JSON: $CERTS_JSON"
+          # Use python3 (guaranteed on Mac) instead of jq to parse IDs
+          CERT_IDS=$(echo "$CERTS_JSON" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, list):
+        for c in data:
+            cid = c.get('id') or (c.get('attributes',{}) or {}).get('id') or ''
+            if not cid and isinstance(c, dict):
+                # try direct id key at top level
+                cid = c.get('id','')
+            if cid: print(cid)
+except: pass
+" 2>/dev/null || true)
+          echo "Cert IDs to delete: $CERT_IDS"
           for cert_id in $CERT_IDS; do
             echo "Deleting cert: $cert_id"
             app-store-connect certificates delete "$cert_id" \
               --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
               --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" || true
+              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" && echo "Deleted $cert_id" || echo "Delete failed for $cert_id"
           done
 
           # Generate a fresh RSA private key for the new cert
