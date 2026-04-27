@@ -214,38 +214,122 @@ const NewShoppingList = ({ navigation, route }) => {
   // getUserLocation — reads cached {lat,lng} set by locationService at app startup
   const getUserLocation = React.useCallback(() => getCachedLocation(), []);
 
-  // Auto-select top N cheapest foods per nutrient after prices load (N = days)
-  // Reset when days changes so re-selection happens with new count
+  // ─── GREEDY AUTO-SELECT ───────────────────────────────────────────────────
+  // After prices load: for each nutrient (cheapest-to-fill first), find the
+  // cheapest food+qty combo that covers 100% of the daily target × days.
+  // Cross-coverage: selecting a food for nutrient A reduces deficit for B,C…
+  // Reset when days changes so re-runs with new count.
   const autoSelectDoneRef = useRef(false);
   useEffect(() => { autoSelectDoneRef.current = false; }, [days]);
   useEffect(() => {
-    if (!isAutoGenerating && Object.keys(allNutrientProducts).length > 0 && !autoSelectDoneRef.current) {
-      const hasSelections = Object.keys(selectedFoodIds).length > 0;
-      if (hasSelections) { autoSelectDoneRef.current = true; return; }
-      const autoSelected = {};
-      const safeP = (v) => {
-        if (v == null || v === 'N/A') return Infinity;
-        const n = parseFloat(v);
-        return isNaN(n) || n <= 0 ? Infinity : n;
-      };
-      Object.values(allNutrientProducts).forEach(nutrientData => {
-        if (!nutrientData?.foods?.length) return;
-        const priced = [...nutrientData.foods]
-          .filter(f => f.storePrice != null && f.storePrice !== 'N/A' && parseFloat(f.storePrice) > 0)
-          .sort((a, b) => safeP(a.storePrice) - safeP(b.storePrice));
-        const picks = priced.slice(0, days);
-        picks.forEach(food => {
-          if (food.fdcId && !autoSelected[food.fdcId]) {
-            autoSelected[food.fdcId] = true;
-          }
-        });
+    if (isAutoGenerating) return;
+    if (Object.keys(allNutrientProducts).length === 0) return;
+    if (autoSelectDoneRef.current) return;
+    if (Object.keys(selectedFoodIds).length > 0) { autoSelectDoneRef.current = true; return; }
+
+    const safePrice = (v) => {
+      if (v == null || v === 'N/A') return Infinity;
+      const n = parseFloat(v);
+      return isNaN(n) || n <= 0 ? Infinity : n;
+    };
+
+    const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
+    const targets = mergeWithDefaults(summary);
+
+    // Build a flat food pool — keyed by fdcId, enriched with all nutrient data
+    const foodPool = {};
+    Object.entries(allNutrientProducts).forEach(([key, nutrientData]) => {
+      (nutrientData?.foods || []).forEach(food => {
+        if (food.fdcId && !foodPool[food.fdcId]) foodPool[food.fdcId] = food;
       });
-      if (Object.keys(autoSelected).length > 0) {
-        setSelectedFoodIds(autoSelected);
-        autoSelectDoneRef.current = true;
+    });
+
+    // Helper: how much of a nutrient does 1 unit of food provide?
+    const amountPerUnit = (food, nutrientKey) => {
+      const portion = food.portionGrams || 100;
+      const per100g = food.allNutrients?.[nutrientKey]?.amount || 0;
+      return (per100g / 100) * portion;
+    };
+
+    // For each nutrient, calculate cheapest independent cost-to-fill 1 day
+    // (used to sort nutrients: cheapest first, like Gas Tank spreadsheet)
+    const indepCost = (nutrientKey, dailyTarget) => {
+      const foods = Object.values(foodPool).filter(f => safePrice(f.storePrice) < Infinity);
+      let best = Infinity;
+      for (const f of foods) {
+        const amt = amountPerUnit(f, nutrientKey);
+        if (amt <= 0) continue;
+        const qtyNeeded = Math.ceil(dailyTarget / amt);
+        const cost = safePrice(f.storePrice) * qtyNeeded;
+        if (cost < best) best = cost;
+      }
+      return best;
+    };
+
+    // Sort targets: cheapest to cover independently first
+    const sortedTargets = [...targets].sort((a, b) =>
+      indepCost(a.nutrient_key, a.total_target_value) -
+      indepCost(b.nutrient_key, b.total_target_value)
+    );
+
+    // Track remaining deficit per nutrient (in nutrient units, scaled by days)
+    const deficit = {};
+    sortedTargets.forEach(t => {
+      deficit[t.nutrient_key] = (t.total_target_value || 0) * days;
+    });
+
+    const selected = {}; // fdcId -> qty
+
+    for (const target of sortedTargets) {
+      const key = target.nutrient_key;
+      if ((deficit[key] || 0) <= 0) continue; // already covered by cross-benefit
+
+      const remaining = deficit[key];
+
+      // Find cheapest food+qty to cover this deficit
+      let bestFood = null, bestQty = 1, bestCost = Infinity;
+      const foods = Object.values(foodPool).filter(f => safePrice(f.storePrice) < Infinity);
+
+      for (const food of foods) {
+        const amt = amountPerUnit(food, key);
+        if (amt <= 0) continue;
+        const qtyNeeded = Math.max(1, Math.ceil(remaining / amt));
+        const totalCost = safePrice(food.storePrice) * qtyNeeded;
+        if (totalCost < bestCost) {
+          bestCost = totalCost;
+          bestFood = food;
+          bestQty = qtyNeeded;
+        }
+      }
+
+      if (!bestFood) continue;
+
+      // Add to selection (take max qty if already selected for another nutrient)
+      const prevQty = selected[bestFood.fdcId] || 0;
+      const addedQty = Math.max(bestQty - prevQty, 0);
+      selected[bestFood.fdcId] = Math.max(prevQty, bestQty);
+
+      // Reduce ALL nutrients' deficits by what this food contributes (cross-benefit)
+      if (addedQty > 0) {
+        sortedTargets.forEach(t => {
+          const contrib = amountPerUnit(bestFood, t.nutrient_key) * addedQty;
+          deficit[t.nutrient_key] = Math.max(0, (deficit[t.nutrient_key] || 0) - contrib);
+        });
       }
     }
-  }, [isAutoGenerating, allNutrientProducts]);
+
+    if (Object.keys(selected).length > 0) {
+      const selectedIds = {};
+      const quantities = {};
+      Object.entries(selected).forEach(([fdcId, qty]) => {
+        selectedIds[fdcId] = true;
+        quantities[fdcId] = qty;
+      });
+      setSelectedFoodIds(selectedIds);
+      setFoodQuantities(prev => ({ ...prev, ...quantities }));
+      autoSelectDoneRef.current = true;
+    }
+  }, [isAutoGenerating, allNutrientProducts, days]);
 
   const runManualSearch = async () => {
     const q = manualSearchQuery.trim();
