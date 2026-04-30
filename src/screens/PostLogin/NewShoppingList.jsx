@@ -243,7 +243,10 @@ const NewShoppingList = ({ navigation, route }) => {
     };
 
     // SODIUM and FAT are upper-limit nutrients, not goals to maximize — skip in auto-select
-    const SKIP_NUTRIENTS = new Set(['SODIUM', 'FAT']);
+    // Skip nutrients that are either upper-limit caps or unreachable at realistic grocery quantities
+    const SKIP_NUTRIENTS = new Set(['SODIUM', 'FAT', 'POTASIUM']);
+    // Max total quantity of any single grocery item in the list
+    const MAX_QTY_PER_ITEM = 5;
 
     const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
     const targets = mergeWithDefaults(summary);
@@ -294,7 +297,8 @@ const NewShoppingList = ({ navigation, route }) => {
       for (const f of foods) {
         const amt = amountPerUnit(f, nutrientKey);
         if (amt <= 0) continue;
-        const qtyNeeded = Math.ceil(dailyTarget / amt);
+        // Cap at MAX_QTY_PER_ITEM so sorting reflects realistic quantities
+        const qtyNeeded = Math.min(Math.ceil(dailyTarget / amt), MAX_QTY_PER_ITEM);
         const cost = safePrice(f.storePrice) * qtyNeeded;
         if (cost < best) best = cost;
       }
@@ -323,29 +327,32 @@ const NewShoppingList = ({ navigation, route }) => {
 
       const remaining = deficit[key];
 
-      // Find cheapest food+qty to cover this deficit, capped by max cost per nutrient
+      // Find cheapest food+qty to cover this deficit, respecting per-item max qty
       let bestFood = null, bestQty = 1, bestCost = Infinity;
       const foods = Object.values(foodPool).filter(f => safePrice(f.storePrice) < Infinity);
 
       for (const food of foods) {
+        const existingQty = selected[food.fdcId] || 0;
+        if (existingQty >= MAX_QTY_PER_ITEM) continue; // already at max for this item
         const amt = amountPerUnit(food, key);
         if (amt <= 0) continue;
         const qtyNeeded = Math.max(1, Math.ceil(remaining / amt));
-        const totalCost = safePrice(food.storePrice) * qtyNeeded;
+        // Cap at how many more we can add before hitting the limit
+        const canAdd = Math.min(qtyNeeded, MAX_QTY_PER_ITEM - existingQty);
+        const totalCost = safePrice(food.storePrice) * canAdd;
         if (totalCost < bestCost) {
           bestCost = totalCost;
           bestFood = food;
-          bestQty = qtyNeeded;
+          bestQty = canAdd;
         }
       }
 
       if (!bestFood) continue;
 
-      // Add to selection — always add the qty needed to cover remaining deficit,
-      // on top of whatever's already in the cart (deficit already accounts for cross-benefits)
+      // Add to selection — capped at MAX_QTY_PER_ITEM total per item
       const prevQty = selected[bestFood.fdcId] || 0;
-      const addedQty = bestQty; // always add this many MORE units to cover remaining deficit
-      selected[bestFood.fdcId] = prevQty + addedQty;
+      const addedQty = bestQty;
+      selected[bestFood.fdcId] = Math.min(prevQty + addedQty, MAX_QTY_PER_ITEM);
 
       // Reduce ALL nutrients' deficits by what this food contributes (cross-benefit)
       if (addedQty > 0) {
