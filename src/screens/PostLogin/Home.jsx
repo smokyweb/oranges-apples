@@ -215,14 +215,15 @@ const Home = () => {
               <Text style={styles.statusOnTrack}>On Track</Text>
             </View> */}
             <View style={styles.statusRow}>
+              {/* Monthly budget hidden
               <View>
                 <Text style={styles.labelSmall}>Monthly</Text>
                 <Text style={styles.valueLarge}>${totalBudget.toFixed(2)}</Text>
               </View>
+              */}
               <View>
                 <Text style={styles.labelSmall}>Household Size</Text>
                 <Text style={styles.valueLarge}>{familyMembers?.length || 0} People</Text>
-                {/* <Text style={styles.labelXSmall}>2 adults, 2 kids</Text> */}
               </View>
             </View>
           </View>

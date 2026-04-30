@@ -1235,18 +1235,18 @@ const NewShoppingList = ({ navigation, route }) => {
 
     const storeName = 'Walmart'; // const storeName = selectedStore === STORE_KROGER ? 'Kroger' : 'Walmart'; // KROGER DISABLED
     const items = selectedFoods
-      .filter(food => food.storeProduct && food.storePrice != null && food.storePrice !== 'N/A')
+      .filter(food => food.storePrice != null && food.storePrice !== 'N/A')
       .map(food => {
         const qty = foodQuantities[food.fdcId] || 1;
         return {
-          product_id: (food.storeProduct.itemId ?? food.fdcId)?.toString(),
+          product_id: (food.storeProduct?.itemId ?? food.fdcId)?.toString(),
           product_name: food.description,
           recipe_name: null,
           product_quantity: qty,
           is_stock: 'true',
-          image: food.storeProduct.thumbnailImage || null,
+          image: food.storeProduct?.thumbnailImage || null,
           salePrice: Number(food.storePrice) || 0,
-          offer_id: food.storeProduct.offerId || null,
+          offer_id: food.storeProduct?.offerId || null,
           store: selectedStore,
           fdc_id: food.fdcId?.toString() || null,
           nutrients: food.allNutrients || null,
