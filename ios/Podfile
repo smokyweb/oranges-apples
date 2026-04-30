@@ -33,16 +33,25 @@ target 'Oranges_To_Apples' do
     # Fix C++ compile errors with Xcode 26 / iOS 26 SDK
     installer.pods_project.targets.each do |target|
       target.build_configurations.each do |config|
-        # Suppress removed C++17 unary/binary function adaptors (needed for fmt, Yoga)
-        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
-        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << '_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION'
-        # Force C++17 standard for all pods
+        # Force C++17 standard
         config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
-        # Additional flags to suppress Xcode 26 strict warnings-as-errors
+        # Suppress all warnings (Xcode 26 is stricter)
         config.build_settings['GCC_WARN_INHIBIT_ALL_WARNINGS'] = 'YES'
         config.build_settings['SWIFT_SUPPRESS_WARNINGS'] = 'YES'
         # Minimum deployment target
         config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0' if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 13.0
+        # Folly + libc++ compatibility flags passed directly to clang
+        # These fix ReactCommon/Yoga/fmt compilation with Xcode 26's newer libc++
+        cxx_flags = '-DFOLLY_NO_CONFIG=1 -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 '
+        cxx_flags += '-DFOLLY_HAVE_LONG_DOUBLE=0 '
+        cxx_flags += '-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION=1 '
+        cxx_flags += '-D_LIBCPP_DISABLE_DEPRECATION_WARNINGS=1'
+        existing = config.build_settings['OTHER_CPLUSPLUSFLAGS']
+        if existing.nil?
+          config.build_settings['OTHER_CPLUSPLUSFLAGS'] = cxx_flags
+        elsif !existing.include?('FOLLY_NO_CONFIG')
+          config.build_settings['OTHER_CPLUSPLUSFLAGS'] = "#{existing} #{cxx_flags}"
+        end
       end
     end
   end
