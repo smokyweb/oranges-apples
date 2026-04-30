@@ -29,6 +29,7 @@ import { getCachedLocation } from '../../helper/locationService';
 import NavigationService from '../../navigation/NavigationService';
 import { RouteName } from '../../helper/strings';
 import { filterTrackedNutrients, mergeWithDefaults, DEFAULT_NUTRIENT_TARGETS } from '../../helper/nutrients';
+import { CURATED_GROCERY_FOODS } from '../../helper/curatedFoods';
 import { getShoppingLists, updateShoppingList, getNutritionTypes, getFamilyNutrition } from '../../../store/home/home.action';
 
 // Store constants
@@ -147,7 +148,7 @@ const NewShoppingList = ({ navigation, route }) => {
   const [listName, setListName] = useState(editMode ? listData?.name || '' : '');
   const [budget, setBudget] = useState(editMode ? listData?.budget?.toString() || '100' : '100');
   const [isAutoGenerating, setIsAutoGenerating] = useState(false);
-  const [days, setDays] = useState(editMode ? Number(listData?.timeline) || 7 : 7);
+  const [days, setDays] = useState(editMode ? Number(listData?.timeline) || 1 : 1);
 
   // Supplemental assistance & dietary preferences
   const [snapEnabled, setSnapEnabled] = useState(false);
@@ -220,7 +221,15 @@ const NewShoppingList = ({ navigation, route }) => {
   // Cross-coverage: selecting a food for nutrient A reduces deficit for B,C…
   // Reset when days changes so re-runs with new count.
   const autoSelectDoneRef = useRef(false);
-  useEffect(() => { autoSelectDoneRef.current = false; }, [days]);
+  // Curated foods selected by auto-select — needed so gauges + cart total can count them
+  const [curatedSelections, setCuratedSelections] = useState([]);
+  // When days changes, clear previous auto-selections so algorithm re-runs with new day count
+  useEffect(() => {
+    autoSelectDoneRef.current = false;
+    setSelectedFoodIds({});
+    setFoodQuantities({});
+    setCuratedSelections([]);
+  }, [days]);
   useEffect(() => {
     if (isAutoGenerating) return;
     if (Object.keys(allNutrientProducts).length === 0) return;
@@ -233,15 +242,41 @@ const NewShoppingList = ({ navigation, route }) => {
       return isNaN(n) || n <= 0 ? Infinity : n;
     };
 
+    // SODIUM and FAT are upper-limit nutrients, not goals to maximize — skip in auto-select
+    const SKIP_NUTRIENTS = new Set(['SODIUM', 'FAT']);
+
     const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
     const targets = mergeWithDefaults(summary);
 
-    // Build a flat food pool — keyed by fdcId, enriched with all nutrient data
-    const foodPool = {};
-    Object.entries(allNutrientProducts).forEach(([key, nutrientData]) => {
+    // Collect any live Walmart prices already fetched for USDA foods
+    const livePriceMap = {};
+    Object.values(allNutrientProducts).forEach(nutrientData => {
       (nutrientData?.foods || []).forEach(food => {
-        if (food.fdcId && !foodPool[food.fdcId]) foodPool[food.fdcId] = food;
+        if (food.description && food.storePrice != null && food.storePrice !== 'N/A') {
+          const p = parseFloat(food.storePrice);
+          const d = food.description.toLowerCase();
+          if (!isNaN(p) && p > 0 && (!livePriceMap[d] || p < livePriceMap[d])) {
+            livePriceMap[d] = p;
+          }
+        }
       });
+    });
+
+    // PRIMARY food pool: curated grocery items from the Gas Tank spreadsheet
+    // Enriched with live Walmart prices when available, else use known fallback prices
+    const foodPool = {};
+    CURATED_GROCERY_FOODS.forEach(food => {
+      const descWords = food.description.toLowerCase().split(' ').filter(w => w.length > 3);
+      let bestLivePrice = null;
+      Object.entries(livePriceMap).forEach(([liveDesc, livePrice]) => {
+        if (descWords.some(w => liveDesc.includes(w))) {
+          if (bestLivePrice === null || livePrice < bestLivePrice) bestLivePrice = livePrice;
+        }
+      });
+      foodPool[food.fdcId] = {
+        ...food,
+        storePrice: bestLivePrice !== null ? bestLivePrice : food.storePrice,
+      };
     });
 
     // Helper: how much of a nutrient does 1 unit of food provide?
@@ -267,10 +302,12 @@ const NewShoppingList = ({ navigation, route }) => {
     };
 
     // Sort targets: cheapest to cover independently first
-    const sortedTargets = [...targets].sort((a, b) =>
-      indepCost(a.nutrient_key, a.total_target_value) -
-      indepCost(b.nutrient_key, b.total_target_value)
-    );
+    const sortedTargets = [...targets]
+      .filter(t => !SKIP_NUTRIENTS.has(t.nutrient_key)) // skip SODIUM, FAT
+      .sort((a, b) =>
+        indepCost(a.nutrient_key, a.total_target_value) -
+        indepCost(b.nutrient_key, b.total_target_value)
+      );
 
     // Track remaining deficit per nutrient (in nutrient units, scaled by days)
     const deficit = {};
@@ -286,7 +323,7 @@ const NewShoppingList = ({ navigation, route }) => {
 
       const remaining = deficit[key];
 
-      // Find cheapest food+qty to cover this deficit
+      // Find cheapest food+qty to cover this deficit, capped by max cost per nutrient
       let bestFood = null, bestQty = 1, bestCost = Infinity;
       const foods = Object.values(foodPool).filter(f => safePrice(f.storePrice) < Infinity);
 
@@ -304,10 +341,11 @@ const NewShoppingList = ({ navigation, route }) => {
 
       if (!bestFood) continue;
 
-      // Add to selection (take max qty if already selected for another nutrient)
+      // Add to selection — always add the qty needed to cover remaining deficit,
+      // on top of whatever's already in the cart (deficit already accounts for cross-benefits)
       const prevQty = selected[bestFood.fdcId] || 0;
-      const addedQty = Math.max(bestQty - prevQty, 0);
-      selected[bestFood.fdcId] = Math.max(prevQty, bestQty);
+      const addedQty = bestQty; // always add this many MORE units to cover remaining deficit
+      selected[bestFood.fdcId] = prevQty + addedQty;
 
       // Reduce ALL nutrients' deficits by what this food contributes (cross-benefit)
       if (addedQty > 0) {
@@ -327,6 +365,26 @@ const NewShoppingList = ({ navigation, route }) => {
       });
       setSelectedFoodIds(selectedIds);
       setFoodQuantities(prev => ({ ...prev, ...quantities }));
+      // Inject curated foods into allNutrientProducts so they appear in each nutrient's scrollable list
+      const curatedFoodObjects = Object.keys(selected).map(fdcId => foodPool[fdcId]).filter(Boolean);
+      setCuratedSelections(curatedFoodObjects);
+      setAllNutrientProducts(prev => {
+        const updated = { ...prev };
+        // For each tracked nutrient, add any curated food that contributes to it
+        Object.keys(updated).forEach(nutrientKey => {
+          const existingIds = new Set((updated[nutrientKey]?.foods || []).map(f => f.fdcId));
+          const toAdd = curatedFoodObjects.filter(f =>
+            !existingIds.has(f.fdcId) && (f.allNutrients?.[nutrientKey]?.amount || 0) > 0
+          );
+          if (toAdd.length > 0) {
+            updated[nutrientKey] = {
+              ...updated[nutrientKey],
+              foods: [...toAdd, ...(updated[nutrientKey]?.foods || [])],
+            };
+          }
+        });
+        return updated;
+      });
       autoSelectDoneRef.current = true;
     }
   }, [isAutoGenerating, allNutrientProducts, days]);
@@ -1010,6 +1068,7 @@ const NewShoppingList = ({ navigation, route }) => {
       ...Object.values(allNutrientProducts).flatMap(({ foods }) => foods || []),
       ...manualSearchResults,
       ...foodsForNutrient,
+      ...curatedSelections,
     ];
     allPools.forEach(food => {
       if (selectedFoodIds[food.fdcId] && !seen.has(food.fdcId)) {
@@ -1247,6 +1306,7 @@ const NewShoppingList = ({ navigation, route }) => {
         setManualSearchQuery('');
         setShowManualSearch(false);
         setFoodQuantities({});
+        setCuratedSelections([]);
         setShowNutritionModal(false);
         const finalList = targetList || currentList;
         if (finalList?.id) {
@@ -1600,19 +1660,34 @@ const NewShoppingList = ({ navigation, route }) => {
                 Eggs: ['egg'],
                 Soy: ['soy','tofu','edamame','tempeh','miso'],
               };
+              // Always filter condiments from displayed recommendations
+              const DISPLAY_CONDIMENT_KW = ['mustard','ketchup','soy sauce','hot sauce',
+                'vinegar','pickle','mayonnaise','anchov','table salt','salt, iodized',
+                'margarine','shortening','lard','egg white, dried','dried egg white',
+                'flour, soy','baking powder','bouillon','protein isolate','whey protein'];
               const applyFoodFilters = (foods) => {
                 const dietExclude = DIET_EXCLUDE[foodPreference] || [];
                 const allergyExclude = selectedAllergies.flatMap(a => ALLERGY_EXCLUDE[a] || []);
                 const allExclude = [...dietExclude, ...allergyExclude];
-                if (!allExclude.length) return foods;
                 return foods.filter(food => {
                   const desc = (food.description || '').toLowerCase();
+                  // Always exclude condiments regardless of preference settings
+                  if (DISPLAY_CONDIMENT_KW.some(kw => desc.includes(kw))) return false;
+                  // Exclude tiny-portion items (condiment-sized)
+                  if ((food.portionGrams || 100) < 25) return false;
+                  if (!allExclude.length) return true;
                   return !allExclude.some(kw => desc.includes(kw));
                 });
               };
-              const displayFoods = applyFoodFilters([...allFoods])
+              // Merge curated selections that are relevant for this nutrient into the display list
+              const selectedCuratedForNutrient = curatedSelections.filter(f =>
+                selectedFoodIds[f.fdcId] && (f.allNutrients?.[key]?.amount || 0) > 0
+              );
+              const existingIds = new Set(allFoods.map(f => f.fdcId));
+              const extraCurated = selectedCuratedForNutrient.filter(f => !existingIds.has(f.fdcId));
+              const displayFoods = applyFoodFilters([...allFoods, ...extraCurated])
                 .sort((a, b) => safeP(a.storePrice) - safeP(b.storePrice))
-                .slice(0, 20);
+                .slice(0, 25); // slightly larger to fit curated extras
 
               // Current value for this nutrient from selected foods
               const currentNutrient = (() => {
@@ -1621,6 +1696,7 @@ const NewShoppingList = ({ navigation, route }) => {
                 const allPools = [
                   ...Object.values(allNutrientProducts).flatMap(s => s.foods || []),
                   ...manualSearchResults,
+                  ...curatedSelections,
                 ];
                 allPools.forEach(f => {
                   if (selectedFoodIds[f.fdcId] && !seen.has(f.fdcId)) {

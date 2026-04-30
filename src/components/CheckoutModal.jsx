@@ -450,12 +450,7 @@ const CheckoutModal = ({ visible, onClose, onPlaceOrder, orderData = {}, foodIte
                             <Text style={styles.totalValue}>${total.toFixed(2)}</Text>
                         </View>
 
-                        <View style={styles.budgetStatus}>
-                            <View style={styles.checkCircle}>
-                                <CustomIcon origin={ICON_TYPE.IONICONS} name="checkmark" size={12} color="#FFF" />
-                            </View>
-                            <Text style={styles.budgetText}>Under budget by <Text style={{ fontWeight: '700' }}>$5.91</Text></Text>
-                        </View>
+
                     </View>
 
 

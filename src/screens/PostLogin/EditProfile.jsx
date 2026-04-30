@@ -297,7 +297,7 @@ const EditProfile = ({ navigation }) => {
             onChangeText={formik.handleChange('email')}
             error={formik.touched.email && formik.errors.email}
             keyboardType="email-address"
-            editable={false}
+            autoCapitalize="none"
           />
           <CustomInput
             label="Phone Number (Optional)"
