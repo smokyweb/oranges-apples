@@ -10,9 +10,10 @@ payload = {'iss': issuer_id, 'exp': int(time.time()) + 900, 'aud': 'appstoreconn
 tok = jwt.encode(payload, private_key, algorithm='ES256', headers={'kid': key_id})
 h = {'Authorization': f'Bearer {tok}'}
 
+# Apple API uses 'DISTRIBUTION' type (not 'IOS_DISTRIBUTION') for iOS distribution certs
 r = requests.get(
     'https://api.appstoreconnect.apple.com/v1/certificates'
-    '?filter[certificateType]=IOS_DISTRIBUTION&limit=20',
+    '?filter[certificateType]=DISTRIBUTION&limit=20',
     headers=h
 )
 if r.status_code != 200:
@@ -20,7 +21,7 @@ if r.status_code != 200:
     sys.exit(0)
 
 certs = r.json().get('data', [])
-print(f'Found {len(certs)} IOS_DISTRIBUTION cert(s) to delete')
+print(f'Found {len(certs)} DISTRIBUTION cert(s) to delete')
 for c in certs:
     cid = c['id']
     d = requests.delete(f'https://api.appstoreconnect.apple.com/v1/certificates/{cid}', headers=h)
