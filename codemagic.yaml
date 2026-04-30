@@ -88,23 +88,27 @@ workflows:
           set -e
           keychain initialize
 
-          # Delete existing IOS_DISTRIBUTION certs so we can create a fresh one
-          CERTS_JSON=$(app-store-connect certificates list \
-            --type IOS_DISTRIBUTION \
-            --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-            --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-            --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
-            --json 2>/dev/null || echo "[]")
-          echo "Certs found: $CERTS_JSON"
-          CERT_IDS=$(echo "$CERTS_JSON" | grep -o '"id":"[^"]*"' | cut -d'"' -f4 || true)
-          echo "IDs to delete: $CERT_IDS"
-          for cert_id in $CERT_IDS; do
-            echo "Deleting cert: $cert_id"
-            app-store-connect certificates delete "$cert_id" \
-              --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY \
-              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" && echo "Deleted $cert_id" || echo "Delete failed for $cert_id"
-          done
+          # Delete all existing IOS_DISTRIBUTION certs via Apple REST API directly
+          pip3 install PyJWT cryptography --quiet
+          python3 - <<PYEOF
+import jwt, time, requests, os, sys
+key_id = os.environ['APP_STORE_CONNECT_KEY_IDENTIFIER']
+issuer_id = os.environ['APP_STORE_CONNECT_ISSUER_ID']
+private_key = os.environ['APP_STORE_CONNECT_PRIVATE_KEY']
+payload = {'iss': issuer_id, 'exp': int(time.time()) + 900, 'aud': 'appstoreconnect-v1'}
+tok = jwt.encode(payload, private_key, algorithm='ES256', headers={'kid': key_id})
+h = {'Authorization': f'Bearer {tok}'}
+r = requests.get('https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=IOS_DISTRIBUTION&limit=20', headers=h)
+if r.status_code != 200:
+    print(f'List failed: {r.status_code} {r.text[:200]}')
+    sys.exit(0)
+certs = r.json().get('data', [])
+print(f'Found {len(certs)} IOS_DISTRIBUTION certs to delete')
+for c in certs:
+    cid = c['id']
+    d = requests.delete(f'https://api.appstoreconnect.apple.com/v1/certificates/{cid}', headers=h)
+    print(f'  Deleted {cid}: {d.status_code}')
+PYEOF
 
           # Generate a fresh RSA private key for the new cert
           openssl genrsa -out /tmp/cert_key.pem 2048
