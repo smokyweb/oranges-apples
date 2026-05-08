@@ -158,12 +158,33 @@ const EditProfile = ({ navigation }) => {
 
       setLoading(true);
       try {
-        const resp = await axiosRequest({
-          method: 'POST',
-          url: 'update-profile',
-          data: formData,
-          // Do not set Content-Type: let axios set multipart/form-data with boundary
-        });
+        let resp;
+        if (isLocalFile) {
+          // Use FormData only when uploading a new profile image (Android multipart works then)
+          resp = await axiosRequest({
+            method: 'POST',
+            url: 'update-profile',
+            data: formData,
+          });
+        } else {
+          // Use JSON for text-only updates — avoids Android multipart/FormData bug
+          resp = await axiosRequest({
+            method: 'POST',
+            url: 'update-profile',
+            data: {
+              name: values.fullName,
+              phone_number: String(values.phone || '').trim() ? `+1${String(values.phone).trim()}` : '',
+              gender: values.gender,
+              age: String(values.age),
+              height_feet: String(values.heightFeet || ''),
+              height_inches: String(values.heightInches || ''),
+              weight: String(values.weight || ''),
+              physical_activity_level: ACTIVITY_LEVEL_TO_TITLE[values.activityLevel] || values.activityLevel,
+              allergies: values.allergies || [],
+              nutritional_needs: values.nutritionalNeeds || {},
+            },
+          });
+        }
         if (resp) {
           dispatch(userAccountAction());
           navigation.goBack();

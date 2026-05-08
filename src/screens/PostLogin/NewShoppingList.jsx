@@ -11,6 +11,7 @@ import {
   TextInput,
   Switch,
   Platform,
+  Linking,
 } from 'react-native';
 import { useDispatch, useSelector } from 'react-redux';
 import WrapperContainer from '../../components/WrapperContainer';
@@ -2017,7 +2018,7 @@ const NewShoppingList = ({ navigation, route }) => {
                               </Text>
                             </View>
 
-                            {/* Price + qty */}
+                            {/* Price + qty + Walmart button */}
                             <View style={styles.recRowRight}>
                               {food.storePriceLoading ? (
                                 <ActivityIndicator size="small" color="#28C76F" />
@@ -2026,6 +2027,21 @@ const NewShoppingList = ({ navigation, route }) => {
                               ) : (
                                 <Text style={styles.recRowNoPrice}>—</Text>
                               )}
+                              {/* Walmart link button */}
+                              <TouchableOpacity
+                                onPress={(e) => {
+                                  e.stopPropagation?.();
+                                  const itemId = food.storeProduct?.itemId;
+                                  const url = itemId
+                                    ? `https://www.walmart.com/ip/${itemId}`
+                                    : `https://www.walmart.com/search?q=${encodeURIComponent(food.description || '')}` ;
+                                  Linking.openURL(url);
+                                }}
+                                style={styles.walmartBtn}
+                                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                              >
+                                <Text style={styles.walmartBtnText}>W</Text>
+                              </TouchableOpacity>
                               {isSelected && (
                                 <View style={styles.recRowQty}>
                                   <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); updateFoodQty(food.fdcId, -1); }} style={styles.recRowQtyBtn}>
@@ -2476,6 +2492,11 @@ const styles = StyleSheet.create({
   recRowName: { fontSize: textScale(12), fontWeight: '600', color: '#111827', lineHeight: 16 },
   recRowSub: { fontSize: textScale(10), color: '#6B7280', marginTop: 1 },
   recRowRight: { alignItems: 'flex-end', minWidth: 52 },
+  walmartBtn: {
+    backgroundColor: '#0071CE', borderRadius: 4,
+    paddingHorizontal: 5, paddingVertical: 2, marginTop: 3,
+  },
+  walmartBtnText: { color: '#fff', fontSize: textScale(10), fontWeight: '800' },
   recRowPrice: { fontSize: textScale(13), fontWeight: '800', color: '#111827' },
   recRowNoPrice: { fontSize: textScale(12), color: '#9CA3AF' },
   recRowQty: {
