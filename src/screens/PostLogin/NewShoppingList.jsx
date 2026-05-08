@@ -29,7 +29,7 @@ import { getCachedLocation } from '../../helper/locationService';
 import NavigationService from '../../navigation/NavigationService';
 import { RouteName } from '../../helper/strings';
 import { filterTrackedNutrients, mergeWithDefaults, DEFAULT_NUTRIENT_TARGETS } from '../../helper/nutrients';
-import { CURATED_GROCERY_FOODS } from '../../helper/curatedFoods';
+import { CURATED_GROCERY_FOODS } from '../../helper/curatedFoods'; // fallback if backend unavailable
 import { getShoppingLists, updateShoppingList, getNutritionTypes, getFamilyNutrition } from '../../../store/home/home.action';
 
 // Store constants
@@ -148,6 +148,7 @@ const NewShoppingList = ({ navigation, route }) => {
   const [listName, setListName] = useState(editMode ? listData?.name || '' : '');
   const [budget, setBudget] = useState(editMode ? listData?.budget?.toString() || '100' : '100');
   const [isAutoGenerating, setIsAutoGenerating] = useState(false);
+  const [suggestionMode, setSuggestionMode] = useState('budget'); // 'budget' | 'complete'
   const [days, setDays] = useState(editMode ? Number(listData?.timeline) || 1 : 1);
 
   // Supplemental assistance & dietary preferences
@@ -223,13 +224,26 @@ const NewShoppingList = ({ navigation, route }) => {
   const autoSelectDoneRef = useRef(false);
   // Curated foods selected by auto-select — needed so gauges + cart total can count them
   const [curatedSelections, setCuratedSelections] = useState([]);
-  // When days changes, clear previous auto-selections so algorithm re-runs with new day count
+  const [backendCuratedFoods, setBackendCuratedFoods] = useState([]); // fetched from /curated-foods
+
+  // Pre-fetch curated foods on mount so they're ready when modal opens (fixes race condition)
+  useEffect(() => {
+    axiosRequest({ url: 'curated-foods', method: 'GET' })
+      .then(resp => {
+        const foods = resp?.data || resp || [];
+        if (Array.isArray(foods) && foods.length > 0) {
+          setBackendCuratedFoods(foods);
+        }
+      })
+      .catch(() => {}); // fail silently, fallback to hardcoded
+  }, []);
+  // When days or mode changes, clear previous auto-selections so algorithm re-runs
   useEffect(() => {
     autoSelectDoneRef.current = false;
     setSelectedFoodIds({});
     setFoodQuantities({});
     setCuratedSelections([]);
-  }, [days]);
+  }, [days, suggestionMode]);
   useEffect(() => {
     if (isAutoGenerating) return;
     if (Object.keys(allNutrientProducts).length === 0) return;
@@ -247,6 +261,8 @@ const NewShoppingList = ({ navigation, route }) => {
     const SKIP_NUTRIENTS = new Set(['SODIUM', 'FAT', 'POTASIUM']);
     // Max total quantity of any single grocery item in the list
     const MAX_QTY_PER_ITEM = 5;
+    // Max total spend — in budget mode stop at $25/day; in complete mode no cap
+    const MAX_TOTAL_SPEND = suggestionMode === 'budget' ? 25 * days : Infinity;
 
     const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
     const targets = mergeWithDefaults(summary);
@@ -265,20 +281,23 @@ const NewShoppingList = ({ navigation, route }) => {
       });
     });
 
-    // PRIMARY food pool: curated grocery items from the Gas Tank spreadsheet
-    // Enriched with live Walmart prices when available, else use known fallback prices
+    // PRIMARY food pool: backend curated foods (with hardcoded JS as fallback)
+    // Enriched with live Walmart prices when available, else use fallback prices
+    const curatedSource = backendCuratedFoods.length > 0 ? backendCuratedFoods : CURATED_GROCERY_FOODS;
     const foodPool = {};
-    CURATED_GROCERY_FOODS.forEach(food => {
-      const descWords = food.description.toLowerCase().split(' ').filter(w => w.length > 3);
+    curatedSource.forEach(food => {
+      const descWords = (food.description || '').toLowerCase().split(' ').filter(w => w.length > 3);
       let bestLivePrice = null;
       Object.entries(livePriceMap).forEach(([liveDesc, livePrice]) => {
         if (descWords.some(w => liveDesc.includes(w))) {
           if (bestLivePrice === null || livePrice < bestLivePrice) bestLivePrice = livePrice;
         }
       });
-      foodPool[food.fdcId] = {
+      const fdcId = food.fdcId || ('g_' + (food.id || food.description));
+      foodPool[fdcId] = {
         ...food,
-        storePrice: bestLivePrice !== null ? bestLivePrice : food.storePrice,
+        fdcId,
+        storePrice: bestLivePrice !== null ? bestLivePrice : (food.fallbackPrice || food.storePrice),
       };
     });
 
@@ -321,46 +340,97 @@ const NewShoppingList = ({ navigation, route }) => {
 
     const selected = {}; // fdcId -> qty
 
-    for (const target of sortedTargets) {
-      const key = target.nutrient_key;
-      if ((deficit[key] || 0) <= 0) continue; // already covered by cross-benefit
+    // Helper: current total spend
+    const currentSpend = () => Object.entries(selected).reduce((sum, [fdcId, qty]) => {
+      const f = foodPool[fdcId];
+      return sum + (f ? safePrice(f.storePrice) * qty : 0);
+    }, 0);
 
-      const remaining = deficit[key];
+    // Foods to never auto-select (snacks, condiment-level items)
+    // Match by description keyword since fdcId differs between backend (g_1,g_2...) and fallback (g_peanuts...)
+    const isSnackFood = (food) => {
+      const desc = (food.description || '').toLowerCase();
+      return desc.includes('sunflower') || desc.includes('peanut') || desc.includes('banana');
+    };
 
-      // Find cheapest food+qty to cover this deficit, respecting per-item max qty
-      let bestFood = null, bestQty = 1, bestCost = Infinity;
-      const foods = Object.values(foodPool).filter(f => safePrice(f.storePrice) < Infinity);
+    // PHASE 1: Base basket — differs by mode
+    // Budget Mode: lean affordable base (beans, rice, spinach, carrots, eggs)
+    // Full Coverage: larger base (adds chicken, milk, tuna, sweet potato, broccoli)
+    const BUDGET_BASE_KEYWORDS = [
+      'pinto beans',   // protein + fiber (cheap)
+      'white rice',    // carbs (cheap)
+      'frozen spinach', // vit K + vit A (cheap)
+      'baby carrots',  // vit A (cheap)
+      'eggs large',    // protein + vit D
+    ];
+    const FULL_BASE_EXTRA_KEYWORDS = [
+      'chicken leg',   // protein anchor
+      'whole milk',    // calcium + vit D
+      'canned tuna',   // protein + vit D + B12
+      'sweet potato',  // vit A + C
+      'frozen broccoli', // vit C
+      'lentils dry',   // iron + folate
+    ];
+    const BASE_MEAL_KEYWORDS = suggestionMode === 'budget'
+      ? BUDGET_BASE_KEYWORDS
+      : [...BUDGET_BASE_KEYWORDS, ...FULL_BASE_EXTRA_KEYWORDS];
 
-      for (const food of foods) {
-        const existingQty = selected[food.fdcId] || 0;
-        if (existingQty >= MAX_QTY_PER_ITEM) continue; // already at max for this item
-        const amt = amountPerUnit(food, key);
-        if (amt <= 0) continue;
-        const qtyNeeded = Math.max(1, Math.ceil(remaining / amt));
-        // Cap at how many more we can add before hitting the limit
-        const canAdd = Math.min(qtyNeeded, MAX_QTY_PER_ITEM - existingQty);
-        const totalCost = safePrice(food.storePrice) * canAdd;
-        if (totalCost < bestCost) {
-          bestCost = totalCost;
-          bestFood = food;
-          bestQty = canAdd;
+    Object.values(foodPool).forEach(food => {
+      const desc = (food.description || '').toLowerCase();
+      const isBase = BASE_MEAL_KEYWORDS.some(kw => desc.includes(kw.toLowerCase()));
+      if (isBase && safePrice(food.storePrice) < Infinity && currentSpend() < MAX_TOTAL_SPEND) {
+        if (!selected[food.fdcId]) {
+          selected[food.fdcId] = 1;
+          sortedTargets.forEach(t => {
+            const contrib = amountPerUnit(food, t.nutrient_key) * 1;
+            deficit[t.nutrient_key] = Math.max(0, (deficit[t.nutrient_key] || 0) - contrib);
+          });
         }
       }
+    });
 
-      if (!bestFood) continue;
+    // PHASE 2: Fill remaining nutrient gaps — exclude snacks entirely
+    const pricedFoods = Object.values(foodPool)
+      .filter(f => safePrice(f.storePrice) < Infinity && !isSnackFood(f));
 
-      // Add to selection — capped at MAX_QTY_PER_ITEM total per item
-      const prevQty = selected[bestFood.fdcId] || 0;
-      const addedQty = bestQty;
-      selected[bestFood.fdcId] = Math.min(prevQty + addedQty, MAX_QTY_PER_ITEM);
+    for (const target of sortedTargets) {
+      const key = target.nutrient_key;
 
-      // Reduce ALL nutrients' deficits by what this food contributes (cross-benefit)
-      if (addedQty > 0) {
+      // Stop adding food once we've hit the budget cap
+      if (currentSpend() >= MAX_TOTAL_SPEND) break;
+
+      // Cascade: keep picking different foods until deficit is covered or no options left
+      let attempts = 0;
+      while ((deficit[key] || 0) > 0.01 && attempts < 15 && currentSpend() < MAX_TOTAL_SPEND) {
+        attempts++;
+        const remaining = deficit[key];
+
+        // Find cheapest food+qty available (respecting per-item max)
+        let bestFood = null, bestQty = 1, bestCost = Infinity;
+        for (const food of pricedFoods) {
+          const existingQty = selected[food.fdcId] || 0;
+          if (existingQty >= MAX_QTY_PER_ITEM) continue;
+          const amt = amountPerUnit(food, key);
+          if (amt <= 0) continue;
+          const qtyNeeded = Math.max(1, Math.ceil(remaining / amt));
+          const canAdd = Math.min(qtyNeeded, MAX_QTY_PER_ITEM - existingQty);
+          if (canAdd <= 0) continue;
+          const cost = safePrice(food.storePrice) * canAdd;
+          if (cost < bestCost) { bestCost = cost; bestFood = food; bestQty = canAdd; }
+        }
+
+        if (!bestFood) break; // no more options — this nutrient can't reach 100%
+
+        const prevQty = selected[bestFood.fdcId] || 0;
+        selected[bestFood.fdcId] = Math.min(prevQty + bestQty, MAX_QTY_PER_ITEM);
+
+        // Apply cross-benefits from newly added units
         sortedTargets.forEach(t => {
-          const contrib = amountPerUnit(bestFood, t.nutrient_key) * addedQty;
+          const contrib = amountPerUnit(bestFood, t.nutrient_key) * bestQty;
           deficit[t.nutrient_key] = Math.max(0, (deficit[t.nutrient_key] || 0) - contrib);
         });
       }
+
     }
 
     if (Object.keys(selected).length > 0) {
@@ -394,7 +464,7 @@ const NewShoppingList = ({ navigation, route }) => {
       });
       autoSelectDoneRef.current = true;
     }
-  }, [isAutoGenerating, allNutrientProducts, days]);
+  }, [isAutoGenerating, allNutrientProducts, days, suggestionMode]);
 
   const runManualSearch = async () => {
     const q = manualSearchQuery.trim();
@@ -621,6 +691,84 @@ const NewShoppingList = ({ navigation, route }) => {
     }
   };
 
+  // Load curated foods from backend into allNutrientProducts — replaces USDA API calls
+  const loadCuratedNutrients = (curatedFoods, summary) => {
+    const targets = mergeWithDefaults(summary?.length > 0 ? summary : []);
+
+    // Organize curated foods by nutrient (each food appears in every nutrient it contributes to)
+    const byNutrient = {};
+    targets.forEach(t => {
+      const key = t.nutrient_key;
+      const relevant = curatedFoods
+        .filter(f => (f.allNutrients?.[key]?.amount || 0) > 0)
+        .sort((a, b) => {
+          // Sort by nutrient density per package (most coverage first)
+          const aAmt = (a.allNutrients?.[key]?.amount || 0) * (a.portionGrams || 100) / 100;
+          const bAmt = (b.allNutrients?.[key]?.amount || 0) * (b.portionGrams || 100) / 100;
+          return bAmt - aAmt;
+        })
+        .map(f => ({
+          fdcId: f.fdcId || ('g_' + f.id),
+          description: f.description || f.name,
+          portionGrams: f.portionGrams || f.package_size_grams || 100,
+          allNutrients: f.allNutrients,
+          storePrice: f.storePrice || f.fallbackPrice || null,
+          storePriceLoading: true,
+          storeProduct: null,
+        }));
+      byNutrient[key] = { loading: false, foods: relevant, error: '' };
+    });
+
+    setAllNutrientProducts(byNutrient);
+
+    // Fetch live Walmart prices for all unique food descriptions
+    const uniqueDescriptions = [...new Set(curatedFoods.map(f => f.description || f.name).filter(Boolean))];
+    const STORE_WALMART = 'Walmart';
+    const total = uniqueDescriptions.length;
+    let resolved = 0;
+    const loaderTimeout = setTimeout(() => setIsAutoGenerating(false), 30000);
+    const cumulativePriceMap = {};
+
+    uniqueDescriptions.forEach(desc => {
+      const walmartTerm = curatedFoods.find(f => (f.description || f.name) === desc)?.walmartSearchTerm || desc;
+      axiosRequest({
+        method: 'POST',
+        url: 'walmart/fetch-lowest-price-per-ingredient',
+        data: { queries: [walmartTerm] },
+      }).then(priceResp => {
+        if (priceResp?.success && Array.isArray(priceResp.data)) {
+          priceResp.data.forEach(row => {
+            if (row?.ingredient && row.lowest_price && row.lowest_price !== 'N/A') {
+              cumulativePriceMap[desc] = { price: row.lowest_price, product: row.product };
+            }
+          });
+        }
+      }).catch(() => {}).finally(() => {
+        resolved++;
+        // Update prices in allNutrientProducts
+        setAllNutrientProducts(prev => {
+          const updated = { ...prev };
+          Object.keys(updated).forEach(key => {
+            updated[key] = {
+              ...updated[key],
+              foods: updated[key].foods.map(food => {
+                const match = cumulativePriceMap[food.description];
+                if (match) return { ...food, storePriceLoading: false, storePrice: match.price, storeProduct: match.product };
+                if (resolved === total) return { ...food, storePriceLoading: false };
+                return food;
+              }),
+            };
+          });
+          return updated;
+        });
+        if (resolved === total) {
+          clearTimeout(loaderTimeout);
+          setIsAutoGenerating(false);
+        }
+      });
+    });
+  };
+
   const loadAllNutrients = (summary, store) => {
     const merged = mergeWithDefaults(summary);
     const targets = merged.length > 0 ? merged : DEFAULT_NUTRIENT_TARGETS;
@@ -783,6 +931,7 @@ const NewShoppingList = ({ navigation, route }) => {
 
   const openProductsModal = () => {
     setShowNutritionModal(true);
+    // Curated foods are pre-fetched on mount — no need to re-fetch here
     // Always re-fetch family nutrition so profile changes reflect immediately
     dispatch(getFamilyNutrition()).then((action) => {
       const summary =
@@ -800,7 +949,15 @@ const NewShoppingList = ({ navigation, route }) => {
         setFoodsForNutrient([]);
         setFoodsError('');
         setIsAutoGenerating(true);
-        loadAllNutrients(summary, selectedStore);
+
+        // If backend curated foods are loaded, use them to populate allNutrientProducts
+        // Otherwise fall back to USDA API via loadAllNutrients
+        const curatedPool = backendCuratedFoods.length > 0 ? backendCuratedFoods : null;
+        if (curatedPool) {
+          loadCuratedNutrients(curatedPool, summary);
+        } else {
+          loadAllNutrients(summary, selectedStore);
+        }
       } else {
         // Re-opening — keep selected nutrient, just make sure one is set
         setSelectedNutrientKey(prev => prev || DEFAULT_NUTRIENT_TARGETS[0]?.nutrient_key || null);
@@ -1449,6 +1606,31 @@ const NewShoppingList = ({ navigation, route }) => {
               </TouchableOpacity>
             </View>
           </View>
+
+          {/* Suggestion Mode */}
+          <View style={{ marginTop: 16 }}>
+            <Text style={styles.sectionLabel}>Recommendation Mode</Text>
+            <TouchableOpacity
+              style={[styles.modeOption, suggestionMode === 'budget' && styles.modeOptionActive]}
+              onPress={() => setSuggestionMode('budget')}
+            >
+              <View style={styles.modeRow}>
+                <Text style={[styles.modeTitle, suggestionMode === 'budget' && styles.modeTitleActive]}>Budget Mode</Text>
+                {suggestionMode === 'budget' && <Text style={styles.modeCheck}>✓</Text>}
+              </View>
+              <Text style={styles.modeDesc}>Stays within a realistic SNAP/WIC budget (~$25/day). Some nutrients may be partially covered. Best for low budget families.</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modeOption, suggestionMode === 'complete' && styles.modeOptionActive]}
+              onPress={() => setSuggestionMode('complete')}
+            >
+              <View style={styles.modeRow}>
+                <Text style={[styles.modeTitle, suggestionMode === 'complete' && styles.modeTitleActive]}>Full Coverage Mode</Text>
+                {suggestionMode === 'complete' && <Text style={styles.modeCheck}>✓</Text>}
+              </View>
+              <Text style={styles.modeDesc}>Covers 100% of all 18 nutrients for your family. Cost may be higher. Best for showing the true nutritional minimum.</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
 
@@ -1608,12 +1790,19 @@ const NewShoppingList = ({ navigation, route }) => {
 
             {/* Cart total + Days row */}
             <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: moderateScale(12), paddingVertical: moderateScaleVertical(8), gap: 12 }}>
-              {/* Cart total */}
-              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                <Text style={styles.modalBudgetLabel}>🛒 Cart</Text>
-                <Text style={[styles.modalBudgetCart, { color: '#28C76F', fontWeight: '700', marginLeft: 6 }]}>
-                  ${cartTotal.toFixed(2)}
-                </Text>
+              {/* Cart total + per day */}
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Text style={styles.modalBudgetLabel}>🛒 Cart</Text>
+                  <Text style={[styles.modalBudgetCart, { color: '#28C76F', fontWeight: '700', marginLeft: 6 }]}>
+                    ${cartTotal.toFixed(2)}
+                  </Text>
+                </View>
+                {days > 1 && cartTotal > 0 && (
+                  <Text style={{ fontSize: textScale(11), color: '#6B7280', marginTop: 1 }}>
+                    ${(cartTotal / days).toFixed(2)}/day
+                  </Text>
+                )}
               </View>
               {/* Days selector */}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -1738,6 +1927,21 @@ const NewShoppingList = ({ navigation, route }) => {
                       unit={item?.unit}
                       current={currentNutrient}
                     />
+                    {/* Partial coverage explanation */}
+                    {(() => {
+                      const tgt = (item?.total_target_value || 0) * (days || 1);
+                      const pct = tgt > 0 ? Math.min(100, Math.round((currentNutrient / tgt) * 100)) : 0;
+                      if (pct >= 100) return null;
+                      return (
+                        <TouchableOpacity
+                          style={styles.partialInfoRow}
+                          onPress={() => showAlert(`${key} is at ${pct}% coverage.\n\nTo reach 100%, more servings of high-${key.toLowerCase()} foods would be needed. The 5-item limit per product keeps your list realistic.\n\nTip: The remaining ${100-pct}% is often covered naturally by other foods in your diet.`)}
+                        >
+                          <CustomIcon origin={ICON_TYPE.IONICONS} name="information-circle-outline" size={16} color="#F59E0B" />
+                          <Text style={styles.partialInfoText}>{pct}% covered — tap to learn why</Text>
+                        </TouchableOpacity>
+                      );
+                    })()}
                   </View>
 
                   {/* Nav arrows */}
@@ -2223,6 +2427,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#F9FAFB', borderRadius: 10,
     padding: moderateScale(10), marginBottom: moderateScaleVertical(6),
   },
+  partialInfoRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    marginTop: 4, paddingTop: 4,
+    borderTopWidth: 1, borderTopColor: '#FEF3C7',
+  },
+  partialInfoText: {
+    fontSize: textScale(11), color: '#B45309', flex: 1,
+  },
   nutrientNavRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     marginBottom: moderateScaleVertical(6),
@@ -2287,6 +2499,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#E5E7EB',
     alignItems: 'center', justifyContent: 'center',
   },
+  modeOption: {
+    borderWidth: 1.5, borderColor: '#D1D5DB', borderRadius: 10,
+    padding: moderateScale(12), marginBottom: moderateScaleVertical(8),
+    backgroundColor: '#F9FAFB',
+  },
+  modeOptionActive: {
+    borderColor: '#28C76F', backgroundColor: '#ECFDF5',
+  },
+  modeRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  modeTitle: { fontSize: textScale(14), fontWeight: '700', color: '#374151' },
+  modeTitleActive: { color: '#16A34A' },
+  modeCheck: { fontSize: textScale(16), color: '#16A34A', fontWeight: '700' },
+  modeDesc: { fontSize: textScale(12), color: '#6B7280', lineHeight: 18 },
   daysBtnSmallText: {
     fontSize: textScale(16), fontWeight: '700', color: '#374151', lineHeight: 20,
   },
