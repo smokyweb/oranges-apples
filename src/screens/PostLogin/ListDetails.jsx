@@ -35,6 +35,7 @@ import { RouteName } from '../../helper/strings';
 import AdditionalItemsModal from '../../components/AdditionalItemsModal';
 import CheckoutModal from '../../components/CheckoutModal';
 import { TRACKED_NUTRIENT_KEYS, DEFAULT_NUTRIENT_TARGETS } from '../../helper/nutrients';
+import axiosRequest from '../../helper/axiosRequest';
 
 const ListDetails = ({ route }) => {
   const { listData = null } = route?.params || {};
@@ -53,6 +54,11 @@ const ListDetails = ({ route }) => {
   const [selectedAdditionalItems, setSelectedAdditionalItems] = useState([]);
   const [selectedStore, setSelectedStore] = useState('walmart');
   const [showNutrients, setShowNutrients] = useState(false);
+  const [showSaveAsNew, setShowSaveAsNew] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  const [isSavingNew, setIsSavingNew] = useState(false);
+  const [isRefreshingPrices, setIsRefreshingPrices] = useState(false);
+  const [priceChanges, setPriceChanges] = useState(null); // { saved: X, current: Y }
 
   const ingredients = shoppingListItems?.data?.data || [];
   const meals = recipes?.data || recipes?.hits || [];
@@ -182,6 +188,92 @@ const ListDetails = ({ route }) => {
 
   const handleDeleteList = () => {
     setShowDeleteConfirm(true);
+  };
+
+  // Refresh Walmart prices for all items in this list
+  const handleRefreshPrices = async () => {
+    const items = selectedFoodItems;
+    if (!items || items.length === 0) return;
+    setIsRefreshingPrices(true);
+    setPriceChanges(null);
+    try {
+      const descriptions = [...new Set(items.map(i => i.name).filter(Boolean))];
+      const oldTotal = items.reduce((s, i) => s + (parseFloat(i.salePrice) || 0) * (i.product_quantity || 1), 0);
+      const priceResp = await axiosRequest({
+        method: 'POST',
+        url: 'walmart/fetch-lowest-price-per-ingredient',
+        data: { queries: descriptions },
+      });
+      if (priceResp?.success && Array.isArray(priceResp.data)) {
+        const priceMap = {};
+        priceResp.data.forEach(row => {
+          if (row?.ingredient && row.lowest_price && row.lowest_price !== 'N/A') {
+            priceMap[row.ingredient] = parseFloat(row.lowest_price);
+          }
+        });
+        let newTotal = 0;
+        items.forEach(item => {
+          const newPrice = priceMap[item.name] ?? parseFloat(item.salePrice) ?? 0;
+          newTotal += newPrice * (item.product_quantity || 1);
+        });
+        setPriceChanges({ saved: oldTotal, current: newTotal });
+      }
+    } catch (e) {
+      console.log('Refresh prices error:', e);
+    } finally {
+      setIsRefreshingPrices(false);
+    }
+  };
+
+  // Save current list as a new list with a different name
+  const handleSaveAsNew = async () => {
+    if (!newListName.trim()) return;
+    setIsSavingNew(true);
+    try {
+      const items = selectedFoodItems;
+      // Create new shopping list
+      const createResp = await axiosRequest({
+        method: 'POST',
+        url: 'shopping-lists',
+        data: {
+          name: newListName.trim(),
+          budget: currentListData?.budget || 100,
+          timeline: currentListData?.timeline || 1,
+          nutrition_focus: currentListData?.nutrition_focus || 'Balanced Diet',
+        },
+      });
+      const newListId = createResp?.data?.id || createResp?.id;
+      if (newListId && items?.length > 0) {
+        // Copy all items to new list
+        for (const item of items) {
+          await axiosRequest({
+            method: 'POST',
+            url: 'shopping-list-items',
+            data: {
+              shopping_list_id: newListId,
+              itemId: item.itemId,
+              name: item.name,
+              salePrice: item.salePrice,
+              product_quantity: item.product_quantity || 1,
+              image: item.thumbnailImage || null,
+              offerId: item.offerId || null,
+              store: 'walmart',
+              fdc_id: item.fdc_id || null,
+              nutrients: item.nutrients || null,
+            },
+          });
+        }
+      }
+      setShowSaveAsNew(false);
+      setNewListName('');
+      dispatch(getShoppingLists());
+      Alert.alert('Saved!', `"${newListName.trim()}" has been saved as a new list.`);
+    } catch (e) {
+      console.log('Save as new error:', e);
+      Alert.alert('Error', 'Could not save list. Please try again.');
+    } finally {
+      setIsSavingNew(false);
+    }
   };
 
   const confirmDelete = async () => {
@@ -459,6 +551,41 @@ const ListDetails = ({ route }) => {
           </TouchableOpacity>
         </View>
 
+        {/* Re-run pricing + Save as new row */}
+        <View style={[styles.actionRow, { marginTop: 8 }]}>
+          <TouchableOpacity
+            style={[styles.actionBtn, { flexDirection: 'row', gap: 4 }]}
+            onPress={handleRefreshPrices}
+            disabled={isRefreshingPrices}
+          >
+            {isRefreshingPrices
+              ? <ActivityIndicator size="small" color="#374151" />
+              : <Text style={styles.actionBtnText}>🔄 Refresh Prices</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionBtn, { backgroundColor: '#EFF6FF', borderColor: '#3B82F6', borderWidth: 1 }]}
+            onPress={() => { setNewListName(currentListData?.name ? `${currentListData.name} (copy)` : ''); setShowSaveAsNew(true); }}
+          >
+            <Text style={[styles.actionBtnText, { color: '#1D4ED8' }]}>💾 Save as New</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Price change banner */}
+        {priceChanges && (
+          <View style={[styles.priceChangeBanner, priceChanges.current < priceChanges.saved ? { backgroundColor: '#ECFDF5' } : { backgroundColor: '#FEF2F2' }]}>
+            <Text style={{ fontSize: textScale(13), fontWeight: '600', color: priceChanges.current < priceChanges.saved ? '#16A34A' : '#DC2626' }}>
+              {priceChanges.current < priceChanges.saved
+                ? `↓ Prices dropped! Saved: $${(priceChanges.saved - priceChanges.current).toFixed(2)}`
+                : priceChanges.current > priceChanges.saved
+                ? `↑ Prices up $${(priceChanges.current - priceChanges.saved).toFixed(2)} since last shop`
+                : '• Prices unchanged'}
+            </Text>
+            <Text style={{ fontSize: textScale(11), color: '#6B7280', marginTop: 2 }}>
+              Saved: ${priceChanges.saved.toFixed(2)} → Current: ${priceChanges.current.toFixed(2)}
+            </Text>
+          </View>
+        )}
+
         <TouchableOpacity
           onPress={() => setShowAdditionalItems(true)}
           disabled={isNextDisabled}
@@ -480,6 +607,40 @@ const ListDetails = ({ route }) => {
               </TouchableOpacity>
               <TouchableOpacity style={styles.deleteConfirmBtn} onPress={confirmDelete} disabled={isDeleting}>
                 {isDeleting ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.deleteConfirmText}>Delete</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Save as New List modal */}
+      <Modal visible={showSaveAsNew} transparent animationType="fade" onRequestClose={() => setShowSaveAsNew(false)}>
+        <View style={styles.deleteOverlay}>
+          <View style={styles.deleteDialog}>
+            <Text style={styles.deleteDialogTitle}>Save as New List</Text>
+            <Text style={{ fontSize: textScale(13), color: '#6B7280', marginBottom: 12 }}>
+              Creates a copy of this list with all items. Great for weekly re-orders.
+            </Text>
+            <TextInput
+              style={{ borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, padding: 10, fontSize: textScale(14), marginBottom: 16, color: '#111827' }}
+              value={newListName}
+              onChangeText={setNewListName}
+              placeholder="New list name..."
+              placeholderTextColor="#9CA3AF"
+              autoFocus
+            />
+            <View style={styles.deleteDialogBtns}>
+              <TouchableOpacity style={styles.deleteCancelBtn} onPress={() => setShowSaveAsNew(false)} disabled={isSavingNew}>
+                <Text style={styles.deleteCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.deleteConfirmBtn, { backgroundColor: '#3B82F6' }, (!newListName.trim() || isSavingNew) && { opacity: 0.5 }]}
+                onPress={handleSaveAsNew}
+                disabled={!newListName.trim() || isSavingNew}
+              >
+                {isSavingNew
+                  ? <ActivityIndicator size="small" color="#fff" />
+                  : <Text style={styles.deleteConfirmText}>Save</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -700,6 +861,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
     marginBottom: moderateScaleVertical(10),
+  },
+  priceChangeBanner: {
+    borderRadius: 8, padding: moderateScale(10),
+    marginBottom: moderateScaleVertical(8),
   },
   actionBtn: {
     flex: 1,
