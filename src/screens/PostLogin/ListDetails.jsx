@@ -106,11 +106,15 @@ const ListDetails = ({ route }) => {
     }));
   };
 
-  const selectedFoodItems = React.useMemo(() => {
+  const checkedFoodItems = React.useMemo(() => {
     return ingredients.filter(item => checkedItems[item.id || item.itemId]);
   }, [ingredients, checkedItems]);
 
-  const totalSpent = selectedFoodItems.reduce((sum, item) => {
+  const checkoutFoodItems = React.useMemo(() => {
+    return checkedFoodItems.length > 0 ? checkedFoodItems : ingredients;
+  }, [checkedFoodItems, ingredients]);
+
+  const totalSpent = ingredients.reduce((sum, item) => {
     const price = parseFloat(item.salePrice || item.price || 0);
     const qty = parseInt(item.product_quantity || item.quantity || item.qty || 1, 10);
     return sum + price * qty;
@@ -192,7 +196,7 @@ const ListDetails = ({ route }) => {
 
   // Refresh Walmart prices for all items in this list
   const handleRefreshPrices = async () => {
-    const items = selectedFoodItems;
+    const items = checkoutFoodItems;
     if (!items || items.length === 0) return;
     setIsRefreshingPrices(true);
     setPriceChanges(null);
@@ -230,7 +234,7 @@ const ListDetails = ({ route }) => {
     if (!newListName.trim()) return;
     setIsSavingNew(true);
     try {
-      const items = selectedFoodItems;
+      const items = checkoutFoodItems;
       // Create new shopping list
       const createResp = await axiosRequest({
         method: 'POST',
@@ -661,7 +665,7 @@ const ListDetails = ({ route }) => {
       <CheckoutModal
         visible={showCheckout}
         onClose={() => setShowCheckout(false)}
-        foodItems={selectedFoodItems}
+        foodItems={checkoutFoodItems}
         additionalItems={selectedAdditionalItems}
         shoppingListId={currentListData?.id}
         selectedStore={selectedStore}

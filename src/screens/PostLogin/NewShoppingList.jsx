@@ -29,8 +29,9 @@ import axiosRequest from '../../helper/axiosRequest';
 import { getCachedLocation } from '../../helper/locationService';
 import NavigationService from '../../navigation/NavigationService';
 import { RouteName } from '../../helper/strings';
-import { filterTrackedNutrients, mergeWithDefaults, DEFAULT_NUTRIENT_TARGETS } from '../../helper/nutrients';
+import { mergeWithDefaults, DEFAULT_NUTRIENT_TARGETS } from '../../helper/nutrients';
 import { CURATED_GROCERY_FOODS } from '../../helper/curatedFoods'; // fallback if backend unavailable
+import { buildLowestSpendDailySelections } from '../../helper/smartSuggestions';
 import { getShoppingLists, updateShoppingList, getNutritionTypes, getFamilyNutrition } from '../../../store/home/home.action';
 
 // Store constants
@@ -217,11 +218,7 @@ const NewShoppingList = ({ navigation, route }) => {
   // getUserLocation — reads cached {lat,lng} set by locationService at app startup
   const getUserLocation = React.useCallback(() => getCachedLocation(), []);
 
-  // ─── GREEDY AUTO-SELECT ───────────────────────────────────────────────────
-  // After prices load: for each nutrient (cheapest-to-fill first), find the
-  // cheapest food+qty combo that covers 100% of the daily target × days.
-  // Cross-coverage: selecting a food for nutrient A reduces deficit for B,C…
-  // Reset when days changes so re-runs with new count.
+  // Auto-select one lowest-cost daily-value package per nutrient per day.
   const autoSelectDoneRef = useRef(false);
   // Curated foods selected by auto-select — needed so gauges + cart total can count them
   const [curatedSelections, setCuratedSelections] = useState([]);
@@ -251,22 +248,9 @@ const NewShoppingList = ({ navigation, route }) => {
     if (autoSelectDoneRef.current) return;
     if (Object.keys(selectedFoodIds).length > 0) { autoSelectDoneRef.current = true; return; }
 
-    const safePrice = (v) => {
-      if (v == null || v === 'N/A') return Infinity;
-      const n = parseFloat(v);
-      return isNaN(n) || n <= 0 ? Infinity : n;
-    };
-
-    // SODIUM and FAT are upper-limit nutrients, not goals to maximize — skip in auto-select
-    // Skip nutrients that are either upper-limit caps or unreachable at realistic grocery quantities
-    const SKIP_NUTRIENTS = new Set(['SODIUM', 'FAT', 'POTASIUM']);
-    // Max total quantity of any single grocery item in the list
-    const MAX_QTY_PER_ITEM = 5;
-    // Max total spend — in budget mode stop at $25/day; in complete mode no cap
-    const MAX_TOTAL_SPEND = suggestionMode === 'budget' ? 25 * days : Infinity;
-
     const summary = familyNutrition?.summary || familyNutrition?.data?.summary || [];
     const targets = mergeWithDefaults(summary);
+    const targetByKey = Object.fromEntries(targets.map(target => [target.nutrient_key, target]));
 
     // Collect any live Walmart prices already fetched for USDA foods
     const livePriceMap = {};
@@ -302,149 +286,21 @@ const NewShoppingList = ({ navigation, route }) => {
       };
     });
 
-    // Helper: how much of a nutrient does 1 unit of food provide?
-    const amountPerUnit = (food, nutrientKey) => {
-      const portion = food.portionGrams || 100;
-      const per100g = food.allNutrients?.[nutrientKey]?.amount || 0;
-      return (per100g / 100) * portion;
-    };
-
-    // For each nutrient, calculate cheapest independent cost-to-fill 1 day
-    // (used to sort nutrients: cheapest first, like Gas Tank spreadsheet)
-    const indepCost = (nutrientKey, dailyTarget) => {
-      const foods = Object.values(foodPool).filter(f => safePrice(f.storePrice) < Infinity);
-      let best = Infinity;
-      for (const f of foods) {
-        const amt = amountPerUnit(f, nutrientKey);
-        if (amt <= 0) continue;
-        // Cap at MAX_QTY_PER_ITEM so sorting reflects realistic quantities
-        const qtyNeeded = Math.min(Math.ceil(dailyTarget / amt), MAX_QTY_PER_ITEM);
-        const cost = safePrice(f.storePrice) * qtyNeeded;
-        if (cost < best) best = cost;
-      }
-      return best;
-    };
-
-    // Sort targets: cheapest to cover independently first
-    const sortedTargets = [...targets]
-      .filter(t => !SKIP_NUTRIENTS.has(t.nutrient_key)) // skip SODIUM, FAT
-      .sort((a, b) =>
-        indepCost(a.nutrient_key, a.total_target_value) -
-        indepCost(b.nutrient_key, b.total_target_value)
-      );
-
-    // Track remaining deficit per nutrient (in nutrient units, scaled by days)
-    const deficit = {};
-    sortedTargets.forEach(t => {
-      deficit[t.nutrient_key] = (t.total_target_value || 0) * days;
+    const { selectedQuantities, selectedFoods } = buildLowestSpendDailySelections({
+      targets,
+      foods: Object.values(foodPool),
+      days,
     });
 
-    const selected = {}; // fdcId -> qty
-
-    // Helper: current total spend
-    const currentSpend = () => Object.entries(selected).reduce((sum, [fdcId, qty]) => {
-      const f = foodPool[fdcId];
-      return sum + (f ? safePrice(f.storePrice) * qty : 0);
-    }, 0);
-
-    // Foods to never auto-select (snacks, condiment-level items)
-    // Match by description keyword since fdcId differs between backend (g_1,g_2...) and fallback (g_peanuts...)
-    const isSnackFood = (food) => {
-      const desc = (food.description || '').toLowerCase();
-      return desc.includes('sunflower') || desc.includes('peanut') || desc.includes('banana');
-    };
-
-    // PHASE 1: Base basket — differs by mode
-    // Budget Mode: lean affordable base (beans, rice, spinach, carrots, eggs)
-    // Full Coverage: larger base (adds chicken, milk, tuna, sweet potato, broccoli)
-    const BUDGET_BASE_KEYWORDS = [
-      'pinto beans',   // protein + fiber (cheap)
-      'white rice',    // carbs (cheap)
-      'frozen spinach', // vit K + vit A (cheap)
-      'baby carrots',  // vit A (cheap)
-      'eggs large',    // protein + vit D
-    ];
-    const FULL_BASE_EXTRA_KEYWORDS = [
-      'chicken leg',   // protein anchor
-      'whole milk',    // calcium + vit D
-      'canned tuna',   // protein + vit D + B12
-      'sweet potato',  // vit A + C
-      'frozen broccoli', // vit C
-      'lentils dry',   // iron + folate
-    ];
-    const BASE_MEAL_KEYWORDS = suggestionMode === 'budget'
-      ? BUDGET_BASE_KEYWORDS
-      : [...BUDGET_BASE_KEYWORDS, ...FULL_BASE_EXTRA_KEYWORDS];
-
-    Object.values(foodPool).forEach(food => {
-      const desc = (food.description || '').toLowerCase();
-      const isBase = BASE_MEAL_KEYWORDS.some(kw => desc.includes(kw.toLowerCase()));
-      if (isBase && safePrice(food.storePrice) < Infinity && currentSpend() < MAX_TOTAL_SPEND) {
-        if (!selected[food.fdcId]) {
-          selected[food.fdcId] = 1;
-          sortedTargets.forEach(t => {
-            const contrib = amountPerUnit(food, t.nutrient_key) * 1;
-            deficit[t.nutrient_key] = Math.max(0, (deficit[t.nutrient_key] || 0) - contrib);
-          });
-        }
-      }
-    });
-
-    // PHASE 2: Fill remaining nutrient gaps — exclude snacks entirely
-    const pricedFoods = Object.values(foodPool)
-      .filter(f => safePrice(f.storePrice) < Infinity && !isSnackFood(f));
-
-    for (const target of sortedTargets) {
-      const key = target.nutrient_key;
-
-      // Stop adding food once we've hit the budget cap
-      if (currentSpend() >= MAX_TOTAL_SPEND) break;
-
-      // Cascade: keep picking different foods until deficit is covered or no options left
-      let attempts = 0;
-      while ((deficit[key] || 0) > 0.01 && attempts < 15 && currentSpend() < MAX_TOTAL_SPEND) {
-        attempts++;
-        const remaining = deficit[key];
-
-        // Find cheapest food+qty available (respecting per-item max)
-        let bestFood = null, bestQty = 1, bestCost = Infinity;
-        for (const food of pricedFoods) {
-          const existingQty = selected[food.fdcId] || 0;
-          if (existingQty >= MAX_QTY_PER_ITEM) continue;
-          const amt = amountPerUnit(food, key);
-          if (amt <= 0) continue;
-          const qtyNeeded = Math.max(1, Math.ceil(remaining / amt));
-          const canAdd = Math.min(qtyNeeded, MAX_QTY_PER_ITEM - existingQty);
-          if (canAdd <= 0) continue;
-          const cost = safePrice(food.storePrice) * canAdd;
-          if (cost < bestCost) { bestCost = cost; bestFood = food; bestQty = canAdd; }
-        }
-
-        if (!bestFood) break; // no more options — this nutrient can't reach 100%
-
-        const prevQty = selected[bestFood.fdcId] || 0;
-        selected[bestFood.fdcId] = Math.min(prevQty + bestQty, MAX_QTY_PER_ITEM);
-
-        // Apply cross-benefits from newly added units
-        sortedTargets.forEach(t => {
-          const contrib = amountPerUnit(bestFood, t.nutrient_key) * bestQty;
-          deficit[t.nutrient_key] = Math.max(0, (deficit[t.nutrient_key] || 0) - contrib);
-        });
-      }
-
-    }
-
-    if (Object.keys(selected).length > 0) {
+    if (Object.keys(selectedQuantities).length > 0) {
       const selectedIds = {};
-      const quantities = {};
-      Object.entries(selected).forEach(([fdcId, qty]) => {
+      Object.keys(selectedQuantities).forEach(fdcId => {
         selectedIds[fdcId] = true;
-        quantities[fdcId] = qty;
       });
       setSelectedFoodIds(selectedIds);
-      setFoodQuantities(prev => ({ ...prev, ...quantities }));
+      setFoodQuantities(prev => ({ ...prev, ...selectedQuantities }));
       // Inject curated foods into allNutrientProducts so they appear in each nutrient's scrollable list
-      const curatedFoodObjects = Object.keys(selected).map(fdcId => foodPool[fdcId]).filter(Boolean);
+      const curatedFoodObjects = selectedFoods.map(food => foodPool[food.fdcId] || food).filter(Boolean);
       setCuratedSelections(curatedFoodObjects);
       setAllNutrientProducts(prev => {
         const updated = { ...prev };
@@ -453,7 +309,13 @@ const NewShoppingList = ({ navigation, route }) => {
           const existingIds = new Set((updated[nutrientKey]?.foods || []).map(f => f.fdcId));
           const toAdd = curatedFoodObjects.filter(f =>
             !existingIds.has(f.fdcId) && (f.allNutrients?.[nutrientKey]?.amount || 0) > 0
-          );
+          ).map(food => ({
+            ...food,
+            nutrients: [{
+              amount: food.allNutrients?.[nutrientKey]?.amount || 0,
+              unit: targetByKey[nutrientKey]?.unit || '',
+            }],
+          }));
           if (toAdd.length > 0) {
             updated[nutrientKey] = {
               ...updated[nutrientKey],
@@ -464,8 +326,10 @@ const NewShoppingList = ({ navigation, route }) => {
         return updated;
       });
       autoSelectDoneRef.current = true;
+    } else {
+      autoSelectDoneRef.current = true;
     }
-  }, [isAutoGenerating, allNutrientProducts, days, suggestionMode]);
+  }, [isAutoGenerating, allNutrientProducts, selectedFoodIds, days, familyNutrition, backendCuratedFoods]);
 
   const runManualSearch = async () => {
     const q = manualSearchQuery.trim();
@@ -695,6 +559,7 @@ const NewShoppingList = ({ navigation, route }) => {
   // Load curated foods from backend into allNutrientProducts — replaces USDA API calls
   const loadCuratedNutrients = (curatedFoods, summary) => {
     const targets = mergeWithDefaults(summary?.length > 0 ? summary : []);
+    const targetByKey = Object.fromEntries(targets.map(target => [target.nutrient_key, target]));
 
     // Organize curated foods by nutrient (each food appears in every nutrient it contributes to)
     const byNutrient = {};
@@ -713,6 +578,10 @@ const NewShoppingList = ({ navigation, route }) => {
           description: f.description || f.name,
           portionGrams: f.portionGrams || f.package_size_grams || 100,
           allNutrients: f.allNutrients,
+          nutrients: [{
+            amount: f.allNutrients?.[key]?.amount || 0,
+            unit: targetByKey[key]?.unit || '',
+          }],
           storePrice: f.storePrice || f.fallbackPrice || null,
           storePriceLoading: true,
           storeProduct: null,
@@ -1243,126 +1112,7 @@ const NewShoppingList = ({ navigation, route }) => {
       }
     });
     return total;
-  }, [selectedFoodIds, allNutrientProducts, manualSearchResults, foodsForNutrient, foodQuantities]);
-
-  // Helper: estimate cost to independently cover a nutrient target using cheapest food
-  const cheapestCostForNutrient = (nutrientKey, totalNeeded, foods) => {
-    let minCost = Infinity;
-    foods.forEach(food => {
-      const price = parseFloat(food.storePrice) || 0;
-      if (price <= 0) return;
-      const portionGrams = food.portionGrams || 100;
-      const amtPer100g = food.allNutrients?.[nutrientKey]?.amount || 0;
-      const contribution = (amtPer100g / 100) * portionGrams;
-      if (contribution <= 0) return;
-      const servings = Math.ceil(totalNeeded / contribution);
-      const cost = price * servings;
-      if (cost < minCost) minCost = cost;
-    });
-    return minCost === Infinity ? 0 : minCost;
-  };
-
-  // Auto-generate the cheapest list that covers all nutrient targets.
-  // Accepts explicit foodsPool so it never reads stale state (avoids closure bugs).
-  // budgetLimit: max total spend in dollars (0 = no cap).
-  const autoGenerateList = (nutrientTargets, foodsPool, budgetLimit = 0) => {
-    const allFoods = Object.values(foodsPool || {});
-    if (!allFoods.length || !nutrientTargets?.length) return;
-
-    const periodDays = days || 7;
-
-    // remaining[key] = total amount still needed for the period (starts at daily × days)
-    const remaining = {};
-    nutrientTargets.forEach(t => {
-      remaining[t.nutrient_key] = (t.total_target_value || 0) * periodDays;
-    });
-
-    // Sort nutrients by their individual cost-to-cover (most expensive first)
-    // so the most critical needs are addressed before cheaper ones
-    const nutrientOrder = [...nutrientTargets].sort((a, b) => {
-      const costA = cheapestCostForNutrient(a.nutrient_key, a.total_target_value * periodDays, allFoods);
-      const costB = cheapestCostForNutrient(b.nutrient_key, b.total_target_value * periodDays, allFoods);
-      return costB - costA; // most expensive first
-    });
-
-    const selected = {}; // fdcId -> qty
-    let totalSpentSoFar = 0; // running cost total for budget cap
-
-    nutrientOrder.forEach(({ nutrient_key }) => {
-      if ((remaining[nutrient_key] || 0) <= 0) return; // already covered by earlier selections
-
-      // Find cheapest food per unit of this nutrient (among remaining priced foods)
-      let bestFood = null;
-      let bestRatio = Infinity;
-
-      allFoods.forEach(food => {
-        const price = parseFloat(food.storePrice) || 0;
-        if (price <= 0) return;
-        const portionGrams = food.portionGrams || 100;
-        const amtPer100g = food.allNutrients?.[nutrient_key]?.amount || 0;
-        const contribution = (amtPer100g / 100) * portionGrams;
-        if (contribution <= 0) return;
-        const ratio = price / contribution; // $ per unit of nutrient
-        if (ratio < bestRatio) {
-          bestRatio = ratio;
-          bestFood = food;
-        }
-      });
-
-      if (!bestFood) return;
-
-      const portionGrams = bestFood.portionGrams || 100;
-      const foodPrice = parseFloat(bestFood.storePrice) || 0;
-
-      // How many servings to fully cover this nutrient's remaining need?
-      const amtPer100g = bestFood.allNutrients?.[nutrient_key]?.amount || 0;
-      const contributionPerServing = (amtPer100g / 100) * portionGrams;
-      const servingsNeeded = contributionPerServing > 0
-        ? Math.ceil(remaining[nutrient_key] / contributionPerServing)
-        : 1;
-      let qty = Math.min(Math.max(servingsNeeded, 1), 15);
-
-      // If already selected (from a prior nutrient step), increase qty if needed
-      const existingQty = selected[bestFood.fdcId] || 0;
-      let finalQty = Math.max(existingQty, qty);
-
-      // Budget cap: don't exceed the limit
-      if (budgetLimit > 0 && foodPrice > 0) {
-        // How much budget remains after existing selections?
-        const existingCost = existingQty * foodPrice;
-        const budgetRemaining = budgetLimit - (totalSpentSoFar - existingCost);
-        const maxAffordableQty = Math.floor(budgetRemaining / foodPrice);
-        if (maxAffordableQty <= 0) {
-          // Can't afford any — skip this food if not already selected
-          if (existingQty === 0) return;
-          finalQty = existingQty; // keep what we already have
-        } else {
-          finalQty = Math.min(finalQty, Math.max(existingQty, maxAffordableQty));
-        }
-      }
-
-      selected[bestFood.fdcId] = finalQty;
-      // Update running cost (net delta vs existing)
-      totalSpentSoFar += (finalQty - existingQty) * foodPrice;
-
-      // Reduce remaining for ALL nutrients this food covers (cross-nutrient benefit)
-      const actualQty = finalQty;
-      Object.keys(remaining).forEach(key => {
-        const a = (bestFood.allNutrients?.[key]?.amount || 0);
-        const c = (a / 100) * portionGrams * actualQty;
-        remaining[key] = Math.max(0, (remaining[key] || 0) - c);
-      });
-    });
-
-    if (Object.keys(selected).length > 0) {
-      setSelectedFoodIds(prev => ({
-        ...prev,
-        ...Object.fromEntries(Object.entries(selected).map(([id]) => [id, true])),
-      }));
-      setFoodQuantities(prev => ({ ...prev, ...selected }));
-    }
-    setIsAutoGenerating(false); // lift the loading overlay
-  };
+  }, [selectedFoodIds, allNutrientProducts, manualSearchResults, foodsForNutrient, curatedSelections, foodQuantities]);
 
   const handleAddSelectedFoods = async () => {
     let targetList = currentList || listData;
@@ -1936,7 +1686,7 @@ const NewShoppingList = ({ navigation, route }) => {
                       return (
                         <TouchableOpacity
                           style={styles.partialInfoRow}
-                          onPress={() => showAlert(`${key} is at ${pct}% coverage.\n\nTo reach 100%, more servings of high-${key.toLowerCase()} foods would be needed. The 5-item limit per product keeps your list realistic.\n\nTip: The remaining ${100-pct}% is often covered naturally by other foods in your diet.`)}
+                          onPress={() => showAlert(`${key} is at ${pct}% coverage.\n\nSmart Suggestions now starts with one package or less per nutrient for each shopping day, then removes that day's foods from the next day of recommendations.\n\nIf this is below 100%, no remaining single package covered another full daily value for this nutrient. You can add or adjust items manually from here.`)}
                         >
                           <CustomIcon origin={ICON_TYPE.IONICONS} name="information-circle-outline" size={16} color="#F59E0B" />
                           <Text style={styles.partialInfoText}>{pct}% covered — tap to learn why</Text>
@@ -2246,7 +1996,7 @@ const NewShoppingList = ({ navigation, route }) => {
               <ActivityIndicator size="large" color="#28C76F" style={{ marginBottom: 16 }} />
               <Text style={styles.autoGenOverlayTitle}>Finding Best Recommendations</Text>
               <Text style={styles.autoGenOverlaySubtitle}>
-                Scanning Walmart prices to find the cheapest options for each nutrient...
+                Scanning Walmart prices to find the lowest-cost daily-value options...
               </Text>
             </View>
           </Pressable>
